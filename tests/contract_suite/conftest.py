@@ -1,10 +1,11 @@
 """Shared contract suite.
 
 Every implementation of a contract (fake today, real in later phases) must pass these tests.
-To cover a new implementation, add its factory to the `params` list of the matching fixture.
+Real implementations are offered by the harness areas through `harness.testing.factories`, so
+they are picked up here without editing this file.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import pytest
 
@@ -18,36 +19,46 @@ from fakes.data import InMemoryDataProvider
 from fakes.registry import InMemoryRegistry
 from fakes.runtime import InMemoryCommandInbox, InMemoryRunLog
 from fakes.splitting import ExpandingWindowSplitter
+from harness.testing import factories as real
 
 ProviderFactory = Callable[[Sequence[Bar]], DataProvider]
 
 
-@pytest.fixture(params=[InMemoryRegistry], ids=["in_memory"])
+def _with_real(
+    fake: Callable[..., object], fake_id: str, table: Mapping[str, Callable[..., object]]
+) -> list[object]:
+    """The in-memory fake, plus every real implementation offered by the harness."""
+    return [pytest.param(fake, id=fake_id), *(pytest.param(f, id=n) for n, f in table.items())]
+
+
+@pytest.fixture(params=_with_real(InMemoryRegistry, "in_memory", real.REGISTRY_FACTORIES))
 def registry(request: pytest.FixtureRequest) -> Registry:
     return request.param()  # type: ignore[no-any-return]
 
 
-@pytest.fixture(params=[InMemoryRunLog], ids=["in_memory"])
+@pytest.fixture(params=_with_real(InMemoryRunLog, "in_memory", real.RUNLOG_FACTORIES))
 def runlog(request: pytest.FixtureRequest) -> RunLog:
     return request.param()  # type: ignore[no-any-return]
 
 
-@pytest.fixture(params=[InMemoryCommandInbox], ids=["in_memory"])
+@pytest.fixture(params=_with_real(InMemoryCommandInbox, "in_memory", real.INBOX_FACTORIES))
 def inbox(request: pytest.FixtureRequest) -> CommandInbox:
     return request.param()  # type: ignore[no-any-return]
 
 
-@pytest.fixture(params=[InMemoryDataProvider], ids=["in_memory"])
+@pytest.fixture(params=_with_real(InMemoryDataProvider, "in_memory", real.PROVIDER_FACTORIES))
 def make_provider(request: pytest.FixtureRequest) -> ProviderFactory:
     factory = request.param
     return lambda bars: factory(bars)
 
 
-@pytest.fixture(params=[ImpactCostModel], ids=["impact_fake"])
+@pytest.fixture(params=_with_real(ImpactCostModel, "impact_fake", real.COST_MODEL_FACTORIES))
 def cost_model(request: pytest.FixtureRequest) -> CostModel:
     return request.param()  # type: ignore[no-any-return]
 
 
-@pytest.fixture(params=[ExpandingWindowSplitter], ids=["expanding_fake"])
+@pytest.fixture(
+    params=_with_real(ExpandingWindowSplitter, "expanding_fake", real.SPLITTER_FACTORIES)
+)
 def splitter(request: pytest.FixtureRequest) -> Splitter:
     return request.param()  # type: ignore[no-any-return]

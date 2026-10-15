@@ -4,7 +4,14 @@ version = "0.0.0"
 description = "Automated strategy research lab (short-term US stocks)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "alpaca-py>=0.44.0",
+  "duckdb>=1.5.6",
+  "exchange-calendars>=4.13.2",
+  "numpy>=2.5.4",
+  "pandas>=3.0.6",
+  "pyarrow>=26.0.0",
   "pydantic>=2.7,<3",
+  "scipy>=1.18.1",
 ]
 
 [dependency-groups]
@@ -79,10 +86,10 @@ source_modules = ["contracts", "fakes", "strategies", "harness", "proposer"]
 forbidden_modules = ["broker"]
 
 [[tool.importlinter.contracts]]
-name = "harness must not depend on strategies, proposer, broker or risk"
+name = "harness must not depend on strategies, proposer, broker, risk or engine"
 type = "forbidden"
 source_modules = ["harness"]
-forbidden_modules = ["strategies", "proposer", "broker", "risk"]
+forbidden_modules = ["strategies", "proposer", "broker", "risk", "engine"]
 
 [[tool.importlinter.contracts]]
 name = "nothing may import the proposer"
