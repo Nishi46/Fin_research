@@ -1,0 +1,91 @@
+[project]
+name = "fin-research-lab"
+version = "0.0.0"
+description = "Automated strategy research lab (short-term US stocks)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pydantic>=2.7,<3",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "hypothesis>=6.100",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "import-linter>=2.0",
+  "pre-commit>=3.8",
+  "detect-secrets>=1.5",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".worktrees"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PT"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "."
+explicit_package_bases = true
+exclude = ["^\\.worktrees/", "^\\.venv/"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_decorators = false
+
+[tool.importlinter]
+root_packages = [
+  "contracts",
+  "fakes",
+  "engine",
+  "strategies",
+  "harness",
+  "risk",
+  "broker",
+  "proposer",
+]
+include_external_packages = false
+
+[[tool.importlinter.contracts]]
+name = "contracts is a leaf package"
+type = "forbidden"
+source_modules = ["contracts"]
+forbidden_modules = ["fakes", "engine", "strategies", "harness", "risk", "broker", "proposer"]
+
+[[tool.importlinter.contracts]]
+name = "strategies may import only contracts"
+type = "forbidden"
+source_modules = ["strategies"]
+forbidden_modules = ["fakes", "engine", "harness", "risk", "broker", "proposer"]
+
+[[tool.importlinter.contracts]]
+name = "broker is reachable only from risk and engine"
+type = "forbidden"
+source_modules = ["contracts", "fakes", "strategies", "harness", "proposer"]
+forbidden_modules = ["broker"]
+
+[[tool.importlinter.contracts]]
+name = "harness must not depend on strategies, proposer, broker or risk"
+type = "forbidden"
+source_modules = ["harness"]
+forbidden_modules = ["strategies", "proposer", "broker", "risk"]
+
+[[tool.importlinter.contracts]]
+name = "nothing may import the proposer"
+type = "forbidden"
+source_modules = ["contracts", "fakes", "engine", "strategies", "harness", "risk", "broker"]
+forbidden_modules = ["proposer"]
