@@ -1,1 +1,14 @@
-.worktrees/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.duckdb
+data/

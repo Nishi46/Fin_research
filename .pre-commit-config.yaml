@@ -1,0 +1,38 @@
+# Local hooks that call the project's own environment, so pre-commit needs no network or
+# separate tool installs. Install with: uv run pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --check
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: uv run mypy .
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: capital-literals
+        name: no hard-coded account size
+        entry: uv run python -m tools.check_capital_literals
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: strategy-sandbox
+        name: strategy sandbox tripwire
+        entry: uv run python -m tools.check_strategy_sandbox
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: detect-secrets
+        name: detect secrets
+        entry: uv run detect-secrets-hook --baseline .secrets.baseline
+        language: system
+        exclude: ^uv\.lock$

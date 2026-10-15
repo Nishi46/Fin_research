@@ -1,0 +1,28 @@
+# Paths agents may not write to. One per line; a trailing slash means a directory.
+#
+# Empty during Phase 0 so the lead can finish building. The owner activates the lock at the
+# Phase 0 gate by adding the entries below, and adds harness/ at the Phase 1 gate:
+#
+#   contracts/
+#   .github/
+#   .claude/
+#   pyproject.toml
+#   tools/
+#   engine/
+#   tests/contract_suite/
+#   tests/guards/
+#   docs/PROTECTIONS.md
+#   harness/
+#
+# ACTIVE as of the Phase 0 gate (everything above except harness/). harness/ is added at the
+# Phase 1 gate, after the owner reviews the harness diff.
+
+contracts/
+.github/
+.claude/
+pyproject.toml
+tools/
+engine/
+tests/contract_suite/
+tests/guards/
+docs/PROTECTIONS.md

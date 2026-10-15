@@ -1,0 +1,27 @@
+# Every path below needs review from the owner before merge (enable "Require review from
+# Code Owners" in branch protection; see docs/PROTECTIONS.md).
+
+# The grader and the frozen interfaces
+/harness/                 @Nishi46
+/contracts/               @Nishi46
+/risk/                    @Nishi46
+/broker/                  @Nishi46
+/tests/                   @Nishi46
+/engine/                  @Nishi46
+/fakes/                   @Nishi46
+
+# What runs, and with which keys
+/.github/                 @Nishi46
+/.claude/                 @Nishi46
+/tools/                   @Nishi46
+/Makefile                 @Nishi46
+/pyproject.toml           @Nishi46
+/uv.lock                  @Nishi46
+/.pre-commit-config.yaml  @Nishi46
+/.secrets.baseline        @Nishi46
+
+# Project rules
+/.gitignore               @Nishi46
+/.env.example             @Nishi46
+/CLAUDE.md                @Nishi46
+/docs/project.md          @Nishi46
