@@ -1,4 +1,3 @@
-import itertools
 from datetime import UTC, datetime
 
 import pytest
@@ -20,53 +19,41 @@ def test_defaults_match_spec_r5() -> None:
     assert t.min_profitable_regimes == 2
 
 
-def test_thresholds_are_immutable() -> None:
-    with pytest.raises(ValidationError):
-        DEFAULT_THRESHOLDS.min_trades = 1  # type: ignore[misc]
+def test_pipeline_defaults() -> None:
+    t = DEFAULT_THRESHOLDS
+    assert t.wf_n_splits == 5
+    assert t.wf_min_oos_sharpe == 0.0
+    assert t.wf_min_positive_fold_fraction == 0.6
+    assert t.stability_neighbor_fractions == (0.10, 0.20)
+    assert t.lookahead_check_count == 20
 
 
-def test_regimes_are_a_tuple_so_the_table_cannot_be_edited_in_place() -> None:
-    assert isinstance(DEFAULT_THRESHOLDS.regimes, tuple)
-
-
-def test_regime_table_is_ordered_and_does_not_overlap() -> None:
-    regimes = DEFAULT_THRESHOLDS.regimes
-    assert len(regimes) >= 2
-    for earlier, later in itertools.pairwise(regimes):
-        assert earlier.end <= later.start
-
-
-def test_regime_names_are_unique() -> None:
-    names = [r.name for r in DEFAULT_THRESHOLDS.regimes]
-    assert len(names) == len(set(names))
-
-
-def test_regime_table_contains_a_crash_and_a_bear_and_a_bull() -> None:
-    names = {r.name for r in DEFAULT_THRESHOLDS.regimes}
-    assert {"covid_crash", "bear_2022"} <= names
-    assert any("bull" in n for n in names)
-
-
-def test_regime_lookup_is_half_open() -> None:
-    crash = next(r for r in DEFAULT_THRESHOLDS.regimes if r.name == "covid_crash")
-    assert crash.contains(crash.start)
-    assert not crash.contains(crash.end)
-
-
-def test_overlapping_regimes_rejected() -> None:
-    a = Regime(
-        name="a", start=datetime(2020, 1, 1, tzinfo=UTC), end=datetime(2020, 6, 1, tzinfo=UTC)
-    )
-    b = Regime(
-        name="b", start=datetime(2020, 5, 1, tzinfo=UTC), end=datetime(2020, 9, 1, tzinfo=UTC)
-    )
-    with pytest.raises(ValidationError):
-        Thresholds(regimes=(a, b), min_profitable_regimes=1)
+def test_regime_derivation_settings() -> None:
+    assert DEFAULT_THRESHOLDS.benchmark_symbol == "SPY"
+    assert DEFAULT_THRESHOLDS.regime_min_drawdown == 0.15
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("regime_min_drawdown", 0.0),
+        ("regime_min_drawdown", 1.0),
+        ("regime_min_drawdown", -0.1),
+        ("benchmark_symbol", ""),
+        ("benchmark_symbol", "  "),
+        ("wf_n_splits", 1),
+        ("wf_min_positive_fold_fraction", 0.0),
+        ("wf_min_positive_fold_fraction", 1.5),
+        ("stability_neighbor_fractions", ()),
+        ("stability_neighbor_fractions", (0.0, 0.1)),
+        ("stability_neighbor_fractions", (0.1, 1.0)),
+        ("lookahead_check_count", 0),
+        ("cost_default_spread_bps", -1.0),
+        ("cost_slippage_bps", -0.1),
+        ("cost_commission_per_share", -0.01),
+        ("cost_impact_bps_at_full_adv", -5.0),
+        ("max_adv_participation", 0.0),
+        ("max_adv_participation", 1.5),
         ("dsr_min_probability", 1.5),
         ("dsr_min_probability", 0.0),
         ("pbo_max", 1.5),
@@ -77,11 +64,44 @@ def test_overlapping_regimes_rejected() -> None:
         ("embargo_min_bars", 0),
     ],
 )
-def test_nonsensical_thresholds_rejected(field: str, value: float) -> None:
+def test_nonsensical_thresholds_rejected(field: str, value: object) -> None:
     with pytest.raises(ValidationError):
         Thresholds(**{field: value})
 
 
-def test_cannot_require_more_profitable_regimes_than_exist() -> None:
+def test_cost_defaults_are_frozen_here() -> None:
+    t = DEFAULT_THRESHOLDS
+    assert t.cost_default_spread_bps == 2.0
+    assert t.cost_slippage_bps == 1.0
+    assert t.cost_commission_per_share == 0.0
+    assert t.cost_impact_bps_at_full_adv == 150.0
+    assert t.max_adv_participation == 0.05
+
+
+def test_holdout_criterion_exists() -> None:
+    assert DEFAULT_THRESHOLDS.holdout_min_sharpe == 0.5
+
+
+def test_thresholds_are_immutable() -> None:
     with pytest.raises(ValidationError):
-        Thresholds(min_profitable_regimes=len(DEFAULT_THRESHOLDS.regimes) + 1)
+        DEFAULT_THRESHOLDS.min_trades = 1  # type: ignore[misc]
+
+
+def test_unknown_fields_are_rejected_not_silently_ignored() -> None:
+    # A typo, or an attempt to supply the old hand-written regime table, must fail loudly.
+    with pytest.raises(ValidationError):
+        Thresholds(pbo_maxx=0.9)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        Thresholds(regimes=())  # type: ignore[call-arg]
+
+
+def test_the_config_holds_rules_not_a_regime_table() -> None:
+    assert not hasattr(DEFAULT_THRESHOLDS, "regimes")
+
+
+def test_regime_lookup_is_half_open() -> None:
+    regime = Regime(
+        name="r", start=datetime(2020, 2, 19, tzinfo=UTC), end=datetime(2020, 3, 23, tzinfo=UTC)
+    )
+    assert regime.contains(regime.start)
+    assert not regime.contains(regime.end)

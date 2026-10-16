@@ -1,0 +1,6 @@
+{"_synthetic": true,
+ "corporate_actions": {
+  "forward_splits": [{"symbol": "SPL", "new_rate": 2.0, "old_rate": 1.0, "ex_date": "2026-01-09"}],
+  "cash_dividends": [{"symbol": "DIV", "rate": 1.0, "ex_date": "2026-01-07"}]
+ },
+ "next_page_token": null}

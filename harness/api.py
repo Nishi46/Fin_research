@@ -50,6 +50,8 @@ class TradeRecord(BaseModel):
     shares: float = Field(gt=0)
     cost: float = Field(ge=0)
     pnl: float
+    # Held across a known event (for example earnings): the overnight gap is not a normal gap.
+    crossed_event: bool = False
 
     @field_validator("pnl", "cost")
     @classmethod

@@ -1,0 +1,5 @@
+# SYNTHETIC change history, not a real index. date = effective date of the change.
+date,added,removed
+2026-01-20,NEWCO,OLDCO
+2026-02-10,BBB;CCC,
+2026-03-02,,CCC

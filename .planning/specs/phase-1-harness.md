@@ -80,9 +80,20 @@ The adversary writes strategies and tests designed to defeat the harness and may
 | `cost_sensitivity` | Cost multiplier | 2x; Profit Factor still above 1 |
 | `stability` | Neighbor check | Holds within ±20% of peak across neighboring parameter values |
 | `floors` | Minimum trades | 100 |
-| `floors` | Regimes | Profitable in at least 2 of the regimes the data covers |
+| `floors` | Regimes | Profitable in at least 2 of the regimes the data covers. Regimes are derived from the benchmark in the pinned snapshot (R7), not listed in this config. |
+| `floors` | `regime_min_drawdown` | 0.15: a selloff regime is a decline of at least 15% from a record close |
+| `floors` | `benchmark_symbol` | `SPY` |
 
 **R6. Dependencies** are added by the lead in a separate reviewed change (expected: pandas, numpy, scipy, pyarrow, duckdb, alpaca-py, exchange_calendars, quantstats or empyrical). Verify licences before adding any statistics library for DSR or PBO, or implement them directly from the published papers.
+
+**R7. Regimes are derived, not listed** (amendment, owner decision 2026-10-16; replaces the hand-written regime table).
+1. `derive_regimes(bars, min_drawdown)` in `harness/data/regimes.py` is a pure function of daily benchmark closes. It returns contiguous, non-overlapping half-open `Regime`s that cover the data from its first bar to one day after its last.
+2. Rule on closes: track the running record close. When a decline of at least `min_drawdown` from a record close occurs before the next record close, a **selloff** regime runs from that record close to the lowest close before the next record close. The stretches between selloffs are **advance** regimes. Dips smaller than `min_drawdown` stay inside an advance.
+3. A selloff not yet followed by a new record is **open**: it ends one day after the last bar and is provisional. Completed episodes never change when new data arrives; only the open tail can.
+4. Names are generated from dates (for example `selloff_2020-02-19`, `advance_2020-03-23`; an open selloff gets an `_open` suffix), so they are deterministic.
+5. The pipeline derives regimes from the benchmark bars of the snapshot being validated. The regimes are therefore a function of the snapshot id, which every trial records, so results stay reproducible. The floors stage takes the regimes as an argument. No benchmark bars in the provider means the floors stage FAILS closed.
+6. Regression anchor: a series that passes through the published S&P 500 peak and trough closes of 2018, 2020, 2022 and 2025 must derive exactly the boundaries the owner confirmed: 2018-09-20, 2018-12-24, 2020-02-19, 2020-03-23, 2022-01-03, 2022-10-12, 2025-02-19, 2025-04-08.
+7. Known limits: boundaries are hindsight and apply to attributing past trades, never to a strategy's decisions. SPY from the free IEX feed, adjusted for dividends, can place a peak or trough a day or so away from the index close.
 
 ### Nice to have
 - Postgres `Registry` implementation validated against a live Postgres.

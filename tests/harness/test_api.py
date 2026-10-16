@@ -38,6 +38,11 @@ def test_trade_requires_positive_shares_and_prices() -> None:
         _trade(entry_price=-1.0)
 
 
+def test_trade_event_flag_defaults_to_false_and_can_be_set() -> None:
+    assert _trade().crossed_event is False
+    assert _trade(crossed_event=True).crossed_event is True
+
+
 def test_trade_rejects_naive_datetimes() -> None:
     with pytest.raises(ValidationError):
         _trade(entry_ts=datetime(2020, 1, 2))
