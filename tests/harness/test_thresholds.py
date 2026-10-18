@@ -84,10 +84,18 @@ def test_holdout_requires_a_t_statistic_not_a_fixed_sharpe() -> None:
     assert not hasattr(DEFAULT_THRESHOLDS, "holdout_min_sharpe")
 
 
+def test_holdout_length_and_query_cap_are_frozen_here() -> None:
+    # Owner decision 2026-10-18: a 2-year holdout from the most recent data, 20 lifetime queries.
+    assert DEFAULT_THRESHOLDS.holdout_years == 2
+    assert DEFAULT_THRESHOLDS.holdout_max_queries == 20
+
+
 def test_reconciliation_tolerances_are_frozen_here() -> None:
     t = DEFAULT_THRESHOLDS
     assert t.reconcile_price_tolerance == 0.01
-    assert t.reconcile_max_disagree_fraction == 0.02
+    # Calibrated 2026-10-18 from Alpaca (IEX) vs yfinance on 10 large caps over 3 years: 4 of 7500
+    # bars (0.05%) differed by more than 1%.
+    assert t.reconcile_max_disagree_fraction == 0.005
     assert t.reconcile_min_overlap == 0.9
 
 
@@ -96,6 +104,8 @@ def test_reconciliation_tolerances_are_frozen_here() -> None:
     [
         ("holdout_min_t_stat", 0.0),
         ("holdout_min_t_stat", -1.0),
+        ("holdout_years", 0),
+        ("holdout_max_queries", 0),
         ("reconcile_price_tolerance", 0.0),
         ("reconcile_price_tolerance", 1.0),
         ("reconcile_max_disagree_fraction", -0.01),

@@ -16,6 +16,10 @@ never leaves `evaluate`, and nothing but the boolean is written to the ledger.
 Repeated queries are a leak (a proposer could bisect on a score), so a verdict is recorded per
 `(strategy_id, code_hash)` and a second query for the same code returns the recorded verdict
 without running anything. New code is a new trial and gets its own single query.
+
+Each new code version still leaks one bit, so the ledger also bounds the total: once
+`holdout_max_queries` verdicts are recorded (across all strategies), the gate refuses new code
+until the owner raises the cap. Replays and runner errors do not spend a query.
 """
 
 import json
@@ -42,6 +46,10 @@ class HoldoutNotConfiguredError(Exception):
 
 class HoldoutLocationError(Exception):
     """The holdout directory is inside the repository."""
+
+
+class HoldoutQueryCapError(Exception):
+    """The lifetime cap on holdout queries is used up."""
 
 
 class HoldoutVerdict(BaseModel):
@@ -85,11 +93,17 @@ class HoldoutGate:
         self,
         *,
         min_t_stat: float | None = None,
+        max_queries: int | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
         self._min_t_stat = (
             DEFAULT_THRESHOLDS.holdout_min_t_stat if min_t_stat is None else min_t_stat
         )
+        self._max_queries = (
+            DEFAULT_THRESHOLDS.holdout_max_queries if max_queries is None else max_queries
+        )
+        if self._max_queries < 1:
+            raise ValueError("max_queries must be at least 1")
         self._environ = environ
 
     def evaluate(
@@ -104,12 +118,22 @@ class HoldoutGate:
         recorded = self._lookup(ledger, strategy_id, code_hash)
         if recorded is not None:
             return HoldoutVerdict(passed=recorded)
+        if self._queries_used(ledger) >= self._max_queries:
+            raise HoldoutQueryCapError(
+                f"the holdout allows {self._max_queries} queries in total and all are used"
+            )
 
         passed = holdout_t_statistic(run(directory).daily_returns) >= self._min_t_stat
         entry = {"strategy_id": strategy_id, "code_hash": code_hash, "passed": passed}
         with ledger.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
         return HoldoutVerdict(passed=passed)
+
+    @staticmethod
+    def _queries_used(ledger: Path) -> int:
+        if not ledger.exists():
+            return 0
+        return len(ledger.read_text(encoding="utf-8").splitlines())
 
     @staticmethod
     def _lookup(ledger: Path, strategy_id: str, code_hash: str) -> bool | None:

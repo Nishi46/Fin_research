@@ -16,6 +16,7 @@ from harness.validation.holdout import (
     HoldoutGate,
     HoldoutLocationError,
     HoldoutNotConfiguredError,
+    HoldoutQueryCapError,
     HoldoutVerdict,
     holdout_t_statistic,
     resolve_holdout_dir,
@@ -173,6 +174,66 @@ def test_runner_errors_are_not_recorded(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         gate.evaluate("s", "h", boom)
     assert gate.evaluate("s", "h", lambda _dir: result(GOOD)).passed
+
+
+# --- lifetime query cap -----------------------------------------------------------------------
+
+
+def test_default_cap_comes_from_the_configuration(tmp_path: Path) -> None:
+    cap = DEFAULT_THRESHOLDS.holdout_max_queries
+    gate = make_gate(tmp_path)
+    for i in range(cap):
+        gate.evaluate("s", f"h{i}", lambda _d: result(GOOD))
+    with pytest.raises(HoldoutQueryCapError):
+        gate.evaluate("s", "one-too-many", lambda _d: result(GOOD))
+
+
+def test_the_cap_counts_across_strategies_and_gate_instances(tmp_path: Path) -> None:
+    HoldoutGate(max_queries=2, environ={HOLDOUT_ENV_VAR: str(tmp_path)}).evaluate(
+        "a", "h", lambda _d: result(GOOD)
+    )
+    gate = HoldoutGate(max_queries=2, environ={HOLDOUT_ENV_VAR: str(tmp_path)})
+    gate.evaluate("b", "h", lambda _d: result(BAD))
+    with pytest.raises(HoldoutQueryCapError):
+        gate.evaluate("c", "h", lambda _d: result(GOOD))
+
+
+def test_a_refused_query_runs_nothing_and_records_nothing(tmp_path: Path) -> None:
+    gate = HoldoutGate(max_queries=1, environ={HOLDOUT_ENV_VAR: str(tmp_path)})
+    gate.evaluate("s", "h1", lambda _d: result(GOOD))
+    calls = 0
+
+    def runner(_dir: Path) -> BacktestResult:
+        nonlocal calls
+        calls += 1
+        return result(GOOD)
+
+    with pytest.raises(HoldoutQueryCapError):
+        gate.evaluate("s", "h2", runner)
+    assert calls == 0
+    assert len((tmp_path / "holdout_ledger.jsonl").read_text().splitlines()) == 1
+
+
+def test_replaying_a_recorded_verdict_does_not_spend_a_query(tmp_path: Path) -> None:
+    gate = HoldoutGate(max_queries=1, environ={HOLDOUT_ENV_VAR: str(tmp_path)})
+    first = gate.evaluate("s", "h", lambda _d: result(GOOD))
+    assert gate.evaluate("s", "h", lambda _d: result(BAD)) == first
+
+
+def test_a_runner_error_does_not_spend_a_query(tmp_path: Path) -> None:
+    gate = HoldoutGate(max_queries=1, environ={HOLDOUT_ENV_VAR: str(tmp_path)})
+
+    def boom(_dir: Path) -> BacktestResult:
+        raise RuntimeError("engine down")
+
+    with pytest.raises(RuntimeError):
+        gate.evaluate("s", "h", boom)
+    assert gate.evaluate("s", "h", lambda _d: result(GOOD)).passed
+
+
+def test_the_cap_cannot_be_set_below_one() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        HoldoutGate(max_queries=0)
 
 
 # --- threshold --------------------------------------------------------------------------------

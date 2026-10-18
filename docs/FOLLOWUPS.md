@@ -28,20 +28,41 @@ What it needs:
 
 `harness/` is locked after the Phase 1 gate, so this is an owner-unlocked change.
 
-## Calibrate the data reconciliation tolerances
+## Calibrate the data reconciliation tolerances (done 2026-10-18, recalibrate when universe widens)
 
-`reconcile_price_tolerance`, `reconcile_max_disagree_fraction` and `reconcile_min_overlap` are in
-the frozen config as starting points. Once two real sources are wired, measure the distribution of
-real differences between them and set the tolerances from it, then re-freeze.
+Ran `scripts.reconcile_sources` (Alpaca IEX vs yfinance, 10 large caps, 3 years, 7500 bars):
+p50 0.016%, p99 0.15%, p99.9 0.88%, max 2.3%; 4 bars exceeded 1%. Owner approved:
+`reconcile_price_tolerance` stays 1%, `reconcile_max_disagree_fraction` 2% -> 0.5%,
+`reconcile_min_overlap` stays 90%. Caveats: mega-caps only, one run, and the worst bars cluster on
+a few high-volume dates (likely IEX last-trade vs consolidated close). Smaller ETFs and less
+liquid names will differ more. This meets the precondition for running the holdout carve on real
+data (a second source reconciles).
 
-## Alpaca corporate-actions path
+## Alpaca corporate-actions path (resolved)
 
-The default `/v1/corporate-actions` may be wrong; Alpaca's own examples use
-`/v1beta1/corporate-actions`. Run `uv run python -m scripts.alpaca_smoke_test` with paper keys
-(read-only), set `ALPACA_CORPORATE_ACTIONS_PATH` to the path it reports, and make that the
-default in `harness/data/config.py` before locking `harness/`.
+Smoke test run with paper keys: `/v1/corporate-actions` is correct and stays the default
+(`/v1beta1` also returns 200). The earlier HTTP 400s were caused by `limit=10000`; this endpoint
+caps `limit` at 1000 (bars allow 10000). Fixed with `ACTIONS_PAGE_LIMIT` in
+`harness/data/alpaca.py`.
 
 ## Holdout
 
-The gate requires a t-statistic of at least 2. Still open: how long the holdout is and which
-period it covers (nothing carves it out of the data yet), and a lifetime cap on holdout queries.
+Decided by the owner on 2026-10-18:
+- **Length and period:** the most recent 2 years of data (`holdout_years = 2`, about 504 daily
+  returns; t >= 2 then needs an annualized Sharpe of about 1.4). Research and walk-forward use
+  everything before it.
+- **Lifetime cap:** 20 queries in total across all strategies (`holdout_max_queries = 20`). Built:
+  `HoldoutGate` refuses with `HoldoutQueryCapError` once the ledger holds 20 verdicts. Replays and
+  runner errors do not spend a query. Raising the cap is an owner change to the thresholds.
+
+Spec: `.planning/specs/holdout-carve-out.md` (owner decisions recorded there). Preconditions it adds:
+- **Before the carve is run on real data:** a second source (Stooq or yfinance) wired in and
+  reconciling with Alpaca on the full snapshot.
+- **Before build step 5 (proposer agent):** the proposer runs under a separate OS user or
+  container that cannot read the holdout directory. Also add `permissions.deny` Read rules for
+  the holdout directory in the Claude Code settings (owner action, once the path is chosen).
+
+Still open: nothing carves the holdout out of the data yet. That needs a data-split step that
+reserves the last `holdout_years` of the pinned snapshot outside the repository (the holdout
+directory), with an embargo gap between the research window and the holdout for multi-bar labels,
+and the research side must be unable to read it. Spec this before the Phase 1 lock.

@@ -49,10 +49,17 @@ class Thresholds(BaseModel):
     # holdout: minimum t-statistic of the holdout's net daily returns (mean / standard error). It
     # scales with the holdout's length, where a fixed Sharpe is a weaker bar on a short window.
     holdout_min_t_stat: float = Field(default=2.0, gt=0.0)
-    # Data reconciliation between sources. Starting points: calibrate them from the distribution
-    # of real differences once two real sources exist, then re-freeze.
+    # Owner decision 2026-10-18: the holdout is the most recent 2 years of data, and the gate
+    # allows 20 queries in total (each new code version spends one) before it refuses.
+    holdout_years: int = Field(default=2, ge=1)
+    holdout_max_queries: int = Field(default=20, ge=1)
+    # Data reconciliation between sources. Calibrated 2026-10-18 (owner approved) from Alpaca (IEX)
+    # vs yfinance on 10 large caps over 3 years (scripts.reconcile_sources): p99.9 of per-bar
+    # differences was 0.88% and 4 of 7500 bars exceeded 1%. The price tolerance stays above the
+    # IEX-vs-consolidated noise but far below real errors (splits, bad ticks); the disagree
+    # fraction is about 10x the observed rate. Recalibrate when the universe widens.
     reconcile_price_tolerance: float = Field(default=0.01, gt=0.0, lt=1.0)
-    reconcile_max_disagree_fraction: float = Field(default=0.02, ge=0.0, lt=1.0)
+    reconcile_max_disagree_fraction: float = Field(default=0.005, ge=0.0, lt=1.0)
     reconcile_min_overlap: float = Field(default=0.9, gt=0.0, le=1.0)
     # Cost model defaults. They decide what survives cost doubling, so they are frozen here and
     # the cost model, sizer and backtester read them from this object.

@@ -12,6 +12,7 @@ dependencies = [
   "pyarrow>=26.0.0",
   "pydantic>=2.7,<3",
   "scipy>=1.18.1",
+  "yfinance>=1.7.0",
 ]
 
 [dependency-groups]
