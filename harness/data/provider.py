@@ -40,14 +40,14 @@ class ComposedDataProvider:
         corporate_actions: Sequence[CorporateAction] = (),
         membership: PointInTimeMembership | None = None,
         cross_checkers: Sequence[CrossChecker] = (),
-        reconcile_config: ReconcileConfig = ReconcileConfig(),  # noqa: B008
+        reconcile_config: ReconcileConfig | None = None,
         strict: bool = False,
     ) -> None:
         self._raw = sorted(bars, key=lambda b: (b.ts, b.symbol))
         self._actions = sorted(corporate_actions, key=lambda a: (a.effective_at, a.symbol))
         self._membership = membership
         self._checkers = list(cross_checkers)
-        self._config = reconcile_config
+        self._config = reconcile_config or ReconcileConfig.from_thresholds()
         self._strict = strict
         self.quality_issues: list[Issue] = [
             *find_gaps(self._raw),

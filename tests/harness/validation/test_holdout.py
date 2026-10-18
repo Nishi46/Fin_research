@@ -1,27 +1,32 @@
 import json
+import math
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
+from scipy.stats import ttest_1samp  # type: ignore[import-untyped]
 
 from contracts import CapitalConfig
 from harness.api import BacktestResult
+from harness.thresholds import DEFAULT_THRESHOLDS
 from harness.validation.holdout import (
     HOLDOUT_ENV_VAR,
     HoldoutGate,
     HoldoutLocationError,
     HoldoutNotConfiguredError,
     HoldoutVerdict,
+    holdout_t_statistic,
     resolve_holdout_dir,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 START = datetime(2024, 1, 1, tzinfo=UTC)
-SECRET_SCORE = 0.8123456789
 
 
-def result(daily: float) -> BacktestResult:
-    ts = tuple(START + timedelta(days=i) for i in range(5))
+def result(returns: Sequence[float]) -> BacktestResult:
+    ts = tuple(START + timedelta(days=i) for i in range(len(returns)))
     return BacktestResult(
         capital=CapitalConfig(effective_at=START, source="default"),
         snapshot_id="holdout",
@@ -30,21 +35,64 @@ def result(daily: float) -> BacktestResult:
         code_version="v",
         survivorship_biased=True,
         timestamps=ts,
-        daily_returns=tuple(daily for _ in ts),
+        daily_returns=tuple(returns),
         trades=(),
     )
 
 
-def total_return(r: BacktestResult) -> float:
-    return sum(r.daily_returns)
+def series(mean: float, n: int = 120, seed: int = 0) -> list[float]:
+    return [float(x) for x in np.random.default_rng(seed).normal(mean, 0.01, n)]
 
 
-def make_gate(tmp_path: Path, pass_score: float = 0.0) -> HoldoutGate:
-    return HoldoutGate(
-        score=lambda r: SECRET_SCORE * total_return(r) / max(abs(total_return(r)), 1e-12),
-        pass_score=pass_score,
-        environ={HOLDOUT_ENV_VAR: str(tmp_path)},
-    )
+GOOD = series(0.004)  # a clear positive edge
+BAD = series(-0.004)
+
+
+def make_gate(tmp_path: Path, min_t_stat: float | None = None) -> HoldoutGate:
+    return HoldoutGate(min_t_stat=min_t_stat, environ={HOLDOUT_ENV_VAR: str(tmp_path)})
+
+
+# --- the statistic ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_t_statistic_matches_scipy(seed: int) -> None:
+    returns = series(0.001, n=200, seed=seed)
+    expected = float(ttest_1samp(returns, 0.0).statistic)
+    assert holdout_t_statistic(returns) == pytest.approx(expected, rel=1e-9)
+
+
+def test_t_statistic_scales_with_the_length_of_the_holdout() -> None:
+    short = series(0.002, n=30)
+    long = short * 4  # same per-day mean and volatility over a window four times as long
+    ratio = holdout_t_statistic(long) / holdout_t_statistic(short)
+    assert ratio == pytest.approx(2.0, rel=0.05)  # standard error shrinks with sqrt(n)
+
+
+@pytest.mark.parametrize(
+    "returns",
+    [
+        [],
+        [0.01],
+        [0.01] * 50,  # constant: zero standard deviation proves nothing
+        [0.01, 0.02, math.nan],
+        [0.01, 0.02, math.inf],
+        [0.01, 0.02, -math.inf],
+    ],
+    ids=["empty", "one", "constant", "nan", "inf", "-inf"],
+)
+def test_t_statistic_fails_closed(returns: list[float]) -> None:
+    assert holdout_t_statistic(returns) == 0.0
+
+
+def test_a_degenerate_holdout_fails_the_gate(tmp_path: Path) -> None:
+    gate = make_gate(tmp_path)
+    assert not gate.evaluate("s", "constant", lambda _d: result([0.01] * 50)).passed
+    assert not gate.evaluate("s", "one", lambda _d: result([0.01])).passed
+    assert not gate.evaluate("s", "empty", lambda _d: result([])).passed
+
+
+# --- the gate ---------------------------------------------------------------------------------
 
 
 def test_path_comes_from_the_environment(tmp_path: Path) -> None:
@@ -71,12 +119,13 @@ def test_a_missing_directory_is_refused(tmp_path: Path) -> None:
 
 def test_verdict_is_pass_or_fail_only(tmp_path: Path) -> None:
     gate = make_gate(tmp_path)
-    good = gate.evaluate("s", "h1", lambda _dir: result(0.01))
-    bad = gate.evaluate("s", "h2", lambda _dir: result(-0.01))
+    good = gate.evaluate("s", "h1", lambda _dir: result(GOOD))
+    bad = gate.evaluate("s", "h2", lambda _dir: result(BAD))
     assert good == HoldoutVerdict(passed=True)
     assert bad == HoldoutVerdict(passed=False)
     assert set(HoldoutVerdict.model_fields) == {"passed"}
-    assert "0.81" not in repr(good) + repr(bad)
+    t = f"{holdout_t_statistic(GOOD):.4f}"[:5]
+    assert t not in repr(good) + repr(bad)
 
 
 def test_runner_receives_the_directory_outside_the_repo(tmp_path: Path) -> None:
@@ -84,37 +133,33 @@ def test_runner_receives_the_directory_outside_the_repo(tmp_path: Path) -> None:
 
     def run(directory: Path) -> BacktestResult:
         seen.append(directory)
-        return result(0.01)
+        return result(GOOD)
 
     make_gate(tmp_path).evaluate("s", "h", run)
     assert seen == [tmp_path.resolve()]
 
 
 def test_nothing_detailed_is_written_to_disk(tmp_path: Path) -> None:
-    gate = make_gate(tmp_path)
-    gate.evaluate("s", "h", lambda _dir: result(0.01))
+    make_gate(tmp_path).evaluate("s", "h", lambda _dir: result(GOOD))
     text = "".join(p.read_text() for p in tmp_path.iterdir() if p.is_file())
-    assert str(SECRET_SCORE)[:6] not in text
+    t = holdout_t_statistic(GOOD)
+    assert f"{t:.4f}"[:5] not in text
+    assert str(t)[:6] not in text
     assert [json.loads(line) for line in text.splitlines()] == [
         {"strategy_id": "s", "code_hash": "h", "passed": True}
     ]
 
 
 def test_same_code_cannot_probe_the_holdout_twice(tmp_path: Path) -> None:
-    gate = make_gate(tmp_path)
-    first = gate.evaluate("s", "h", lambda _dir: result(0.01))
+    first = make_gate(tmp_path).evaluate("s", "h", lambda _dir: result(GOOD))
     calls = 0
 
     def again(_dir: Path) -> BacktestResult:
         nonlocal calls
         calls += 1
-        return result(-0.01)
+        return result(BAD)
 
-    second = HoldoutGate(
-        score=lambda r: total_return(r),
-        pass_score=0.0,
-        environ={HOLDOUT_ENV_VAR: str(tmp_path)},
-    ).evaluate("s", "h", again)
+    second = make_gate(tmp_path).evaluate("s", "h", again)
     assert second == first
     assert calls == 0
 
@@ -127,26 +172,47 @@ def test_runner_errors_are_not_recorded(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError):
         gate.evaluate("s", "h", boom)
-    assert gate.evaluate("s", "h", lambda _dir: result(0.01)).passed
+    assert gate.evaluate("s", "h", lambda _dir: result(GOOD)).passed
 
 
-def fixed_score_gate(tmp_path: Path, score: float, **kwargs: float) -> HoldoutGate:
-    return HoldoutGate(score=lambda _r: score, environ={HOLDOUT_ENV_VAR: str(tmp_path)}, **kwargs)
+# --- threshold --------------------------------------------------------------------------------
 
 
-def test_default_pass_score_is_the_configured_holdout_sharpe(tmp_path: Path) -> None:
-    from harness.thresholds import DEFAULT_THRESHOLDS
+def test_default_threshold_comes_from_the_configuration(tmp_path: Path) -> None:
+    floor = DEFAULT_THRESHOLDS.holdout_min_t_stat
+    # Find series just above and just below the configured t-statistic.
+    base = series(0.0, n=100, seed=3)
+    scale = np.std(base, ddof=1) / math.sqrt(len(base))
+    above = [x - np.mean(base) + (floor + 0.2) * scale for x in base]
+    below = [x - np.mean(base) + (floor - 0.2) * scale for x in base]
+    assert holdout_t_statistic(above) > floor > holdout_t_statistic(below)
+    gate = make_gate(tmp_path)
+    assert gate.evaluate("s", "above", lambda _d: result(above)).passed
+    assert not gate.evaluate("s", "below", lambda _d: result(below)).passed
 
-    floor = DEFAULT_THRESHOLDS.holdout_min_sharpe
-    above = fixed_score_gate(tmp_path, floor).evaluate("s", "a", lambda _d: result(0.01))
-    below = fixed_score_gate(tmp_path, floor - 0.01).evaluate("s", "b", lambda _d: result(0.01))
-    assert above.passed
-    assert not below.passed
-    assert set(HoldoutVerdict.model_fields) == {"passed"}
+
+def test_t_exactly_at_the_threshold_passes(tmp_path: Path) -> None:
+    t = holdout_t_statistic(GOOD)
+    assert make_gate(tmp_path, min_t_stat=t).evaluate("s", "at", lambda _d: result(GOOD)).passed
+    just_above = math.nextafter(t, math.inf)
+    assert (
+        not make_gate(tmp_path, min_t_stat=just_above)
+        .evaluate("s", "over", lambda _d: result(GOOD))
+        .passed
+    )
 
 
-def test_explicit_pass_score_overrides_the_default(tmp_path: Path) -> None:
-    gate = fixed_score_gate(tmp_path, 0.2, pass_score=0.1)
-    assert gate.evaluate("s", "a", lambda _d: result(0.01)).passed
-    strict = fixed_score_gate(tmp_path, 0.9, pass_score=1.0)
-    assert not strict.evaluate("s", "b", lambda _d: result(0.01)).passed
+def test_explicit_threshold_overrides_the_default(tmp_path: Path) -> None:
+    t = holdout_t_statistic(GOOD)
+    assert t > DEFAULT_THRESHOLDS.holdout_min_t_stat
+    strict = make_gate(tmp_path, min_t_stat=t + 5.0)
+    assert not strict.evaluate("s", "a", lambda _d: result(GOOD)).passed
+    lenient = make_gate(tmp_path, min_t_stat=0.1)
+    assert lenient.evaluate("s", "b", lambda _d: result(series(0.0007, seed=2))).passed
+
+
+def test_the_gate_has_no_caller_supplied_score() -> None:
+    with pytest.raises(TypeError):
+        HoldoutGate(score=lambda r: 1.0)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        HoldoutGate(pass_score=0.0)  # type: ignore[call-arg]

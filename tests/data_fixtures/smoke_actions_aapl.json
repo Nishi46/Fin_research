@@ -1,0 +1,5 @@
+{"_synthetic": true,
+ "corporate_actions": {
+  "forward_splits": [{"symbol": "AAPL", "new_rate": 4.0, "old_rate": 1.0, "ex_date": "2020-08-31", "process_date": "2020-08-31"}]
+ },
+ "next_page_token": null}

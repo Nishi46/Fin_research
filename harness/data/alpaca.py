@@ -21,8 +21,9 @@ from harness.data.ratelimit import RateLimiter
 _NY = ZoneInfo("America/New_York")
 HTTP_TIMEOUT_S = 30
 PAGE_LIMIT = "10000"  # capital-literal-ok: API page size, not an account size
+# The corporate-actions endpoint rejects limits above 1000 with HTTP 400 (bars allow 10000).
+ACTIONS_PAGE_LIMIT = "1000"  # capital-literal-ok: API page size, not an account size
 BARS_PATH = "/v2/stocks/bars"
-ACTIONS_PATH = "/v1/corporate-actions"
 
 
 class HttpClient(Protocol):
@@ -118,10 +119,12 @@ class AlpacaDataClient:
             "types": "forward_split,reverse_split,cash_dividend",
             "start": start.date().isoformat(),
             "end": end.date().isoformat(),
-            "limit": PAGE_LIMIT,
+            "limit": ACTIONS_PAGE_LIMIT,
         }
         actions: list[CorporateAction] = []
-        for page in self._pages(self._config.data_url + ACTIONS_PATH, params):
+        for page in self._pages(
+            self._config.data_url + self._config.corporate_actions_path, params
+        ):
             grouped = page.get("corporate_actions") or {}
             for row in [*grouped.get("forward_splits", []), *grouped.get("reverse_splits", [])]:
                 actions.append(

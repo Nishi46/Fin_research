@@ -99,3 +99,26 @@ def test_config_requires_cache_dir_and_keys_and_hides_secrets() -> None:
 def test_http_client_refuses_non_https() -> None:
     with pytest.raises(ValueError, match="https"):
         UrllibHttpClient().get_json("http://example.invalid/x", {}, {})
+
+
+def test_corporate_actions_path_is_configurable_and_default_unchanged() -> None:
+    base = {"LAB_DATA_CACHE_DIR": "/c", "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "s"}
+    assert DataConfig.from_env(base).corporate_actions_path == "/v1/corporate-actions"
+    custom = DataConfig.from_env(
+        {**base, "ALPACA_CORPORATE_ACTIONS_PATH": "/v1beta1/corporate-actions"}
+    )
+    assert custom.corporate_actions_path == "/v1beta1/corporate-actions"
+    with pytest.raises(ValueError, match="ALPACA_CORPORATE_ACTIONS_PATH"):
+        DataConfig.from_env({**base, "ALPACA_CORPORATE_ACTIONS_PATH": "https://evil.example/x"})
+
+
+def test_client_uses_the_configured_actions_path() -> None:
+    import dataclasses
+
+    http = RecordingHttp([load_json("alpaca_actions.json")])
+    config = dataclasses.replace(_config(), corporate_actions_path="/v1beta1/corporate-actions")
+    limiter = RateLimiter(max_calls=1000, period_s=60.0, clock=lambda: 0.0, sleep=lambda s: None)
+    AlpacaDataClient(http, config, limiter).fetch_corporate_actions(
+        ["SPL"], datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
+    )
+    assert http.calls[0][0].endswith("/v1beta1/corporate-actions")

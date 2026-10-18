@@ -78,8 +78,37 @@ def test_cost_defaults_are_frozen_here() -> None:
     assert t.max_adv_participation == 0.05
 
 
-def test_holdout_criterion_exists() -> None:
-    assert DEFAULT_THRESHOLDS.holdout_min_sharpe == 0.5
+def test_holdout_requires_a_t_statistic_not_a_fixed_sharpe() -> None:
+    # A fixed Sharpe is a weaker bar on a short holdout than on a long one; a t-statistic scales.
+    assert DEFAULT_THRESHOLDS.holdout_min_t_stat == 2.0
+    assert not hasattr(DEFAULT_THRESHOLDS, "holdout_min_sharpe")
+
+
+def test_reconciliation_tolerances_are_frozen_here() -> None:
+    t = DEFAULT_THRESHOLDS
+    assert t.reconcile_price_tolerance == 0.01
+    assert t.reconcile_max_disagree_fraction == 0.02
+    assert t.reconcile_min_overlap == 0.9
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("holdout_min_t_stat", 0.0),
+        ("holdout_min_t_stat", -1.0),
+        ("reconcile_price_tolerance", 0.0),
+        ("reconcile_price_tolerance", 1.0),
+        ("reconcile_max_disagree_fraction", -0.01),
+        ("reconcile_max_disagree_fraction", 1.0),
+        ("reconcile_min_overlap", 0.0),
+        ("reconcile_min_overlap", 1.5),
+    ],
+)
+def test_nonsensical_holdout_and_reconciliation_thresholds_rejected(
+    field: str, value: float
+) -> None:
+    with pytest.raises(ValidationError):
+        Thresholds(**{field: value})
 
 
 def test_thresholds_are_immutable() -> None:

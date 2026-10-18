@@ -46,7 +46,7 @@ def _check(
     name: str,
     primary: Sequence[Bar],
     symbols: Sequence[str],
-    config: ReconcileConfig,
+    config: ReconcileConfig | None,
     fetch: Callable[[str, date, date], list[Bar]],
 ) -> ReconciliationReport:
     other: list[Bar] = []
@@ -68,7 +68,7 @@ class StooqCrossChecker:
         self,
         primary: Sequence[Bar],
         symbols: Sequence[str],
-        config: ReconcileConfig = ReconcileConfig(),  # noqa: B008
+        config: ReconcileConfig | None = None,
     ) -> ReconciliationReport:
         return _check(
             self.name,
@@ -89,7 +89,7 @@ class YFinanceCrossChecker:
         self,
         primary: Sequence[Bar],
         symbols: Sequence[str],
-        config: ReconcileConfig = ReconcileConfig(),  # noqa: B008
+        config: ReconcileConfig | None = None,
     ) -> ReconciliationReport:
         return _check(
             self.name,

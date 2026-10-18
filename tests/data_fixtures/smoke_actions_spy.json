@@ -1,0 +1,5 @@
+{"_synthetic": true,
+ "corporate_actions": {
+  "cash_dividends": [{"symbol": "SPY", "rate": 1.7, "ex_date": "2026-03-20", "pay_date": "2026-04-30"}]
+ },
+ "next_page_token": null}

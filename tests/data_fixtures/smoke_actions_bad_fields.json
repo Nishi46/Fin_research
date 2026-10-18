@@ -1,0 +1,6 @@
+{"_synthetic": true,
+ "corporate_actions": {
+  "forward_splits": [{"symbol": "AAPL", "ratio": 4.0, "exDate": "2020-08-31"}],
+  "cash_dividends": [{"symbol": "SPY", "amount": 1.7, "exDate": "2026-03-20"}]
+ },
+ "next_page_token": null}

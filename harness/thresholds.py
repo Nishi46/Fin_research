@@ -5,8 +5,8 @@ change is a contract-style change that goes through the lead to the owner.
 
 The values are starting points chosen from common practice, not validated numbers. The owner
 approved the walk-forward, neighbour and lookahead values on 2026-10-16, asked for the cost
-defaults to live here, and chose derived regimes over a hand-written table. `holdout_min_sharpe`
-is still a proposal.
+defaults to live here, chose derived regimes over a hand-written table, required a minimum
+t-statistic of 2 for the holdout, and moved the data reconciliation tolerances here.
 
 This object holds rules, not data. Regimes are derived at validation time from the benchmark in
 the pinned data snapshot (`harness.data.regimes.derive_regimes`) using `regime_min_drawdown`, so
@@ -46,8 +46,14 @@ class Thresholds(BaseModel):
     stability_neighbor_fractions: tuple[Annotated[float, Field(gt=0.0, lt=1.0)], ...] = Field(
         default=(0.10, 0.20), min_length=1
     )
-    # holdout: net annualised Sharpe on the hidden final window. PROPOSED, pending owner approval.
-    holdout_min_sharpe: float = Field(default=0.5)
+    # holdout: minimum t-statistic of the holdout's net daily returns (mean / standard error). It
+    # scales with the holdout's length, where a fixed Sharpe is a weaker bar on a short window.
+    holdout_min_t_stat: float = Field(default=2.0, gt=0.0)
+    # Data reconciliation between sources. Starting points: calibrate them from the distribution
+    # of real differences once two real sources exist, then re-freeze.
+    reconcile_price_tolerance: float = Field(default=0.01, gt=0.0, lt=1.0)
+    reconcile_max_disagree_fraction: float = Field(default=0.02, ge=0.0, lt=1.0)
+    reconcile_min_overlap: float = Field(default=0.9, gt=0.0, le=1.0)
     # Cost model defaults. They decide what survives cost doubling, so they are frozen here and
     # the cost model, sizer and backtester read them from this object.
     cost_default_spread_bps: float = Field(default=2.0, ge=0.0)

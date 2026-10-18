@@ -6,6 +6,7 @@ from datetime import date
 
 from contracts.data import Bar
 from harness.data.common import Issue
+from harness.thresholds import DEFAULT_THRESHOLDS, Thresholds
 
 
 class SnapshotRejected(Exception):
@@ -14,11 +15,18 @@ class SnapshotRejected(Exception):
 
 @dataclass(frozen=True)
 class ReconcileConfig:
-    """Starting points, not validated numbers; the owner should review them."""
+    # To be calibrated from the distribution of real differences once two real sources exist.
+    price_tolerance: float = DEFAULT_THRESHOLDS.reconcile_price_tolerance
+    max_disagree_fraction: float = DEFAULT_THRESHOLDS.reconcile_max_disagree_fraction
+    min_overlap: float = DEFAULT_THRESHOLDS.reconcile_min_overlap
 
-    price_tolerance: float = 0.01
-    max_disagree_fraction: float = 0.02
-    min_overlap: float = 0.9
+    @classmethod
+    def from_thresholds(cls, thresholds: Thresholds = DEFAULT_THRESHOLDS) -> "ReconcileConfig":
+        return cls(
+            price_tolerance=thresholds.reconcile_price_tolerance,
+            max_disagree_fraction=thresholds.reconcile_max_disagree_fraction,
+            min_overlap=thresholds.reconcile_min_overlap,
+        )
 
 
 @dataclass(frozen=True)
@@ -36,8 +44,9 @@ def reconcile(
     other: Sequence[Bar],
     *,
     source: str,
-    config: ReconcileConfig = ReconcileConfig(),  # noqa: B008
+    config: ReconcileConfig | None = None,
 ) -> ReconciliationReport:
+    config = config or ReconcileConfig.from_thresholds()
     other_by_key: dict[tuple[str, date], Bar] = {(b.symbol, b.ts.date()): b for b in other}
     compared = 0
     disagreements: list[Issue] = []
