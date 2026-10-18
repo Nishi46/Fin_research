@@ -90,6 +90,14 @@ def test_holdout_length_and_query_cap_are_frozen_here() -> None:
     assert DEFAULT_THRESHOLDS.holdout_max_queries == 20
 
 
+def test_holdout_carve_out_settings_are_frozen_here() -> None:
+    # Owner approved 2026-10-18.
+    t = DEFAULT_THRESHOLDS
+    assert t.holdout_embargo_sessions == 10
+    assert t.holdout_min_session_fraction == 0.9
+    assert t.holdout_min_research_years == 3
+
+
 def test_reconciliation_tolerances_are_frozen_here() -> None:
     t = DEFAULT_THRESHOLDS
     assert t.reconcile_price_tolerance == 0.01
@@ -106,6 +114,10 @@ def test_reconciliation_tolerances_are_frozen_here() -> None:
         ("holdout_min_t_stat", -1.0),
         ("holdout_years", 0),
         ("holdout_max_queries", 0),
+        ("holdout_embargo_sessions", 0),
+        ("holdout_min_session_fraction", 0.0),
+        ("holdout_min_session_fraction", 1.5),
+        ("holdout_min_research_years", 0),
         ("reconcile_price_tolerance", 0.0),
         ("reconcile_price_tolerance", 1.0),
         ("reconcile_max_disagree_fraction", -0.01),

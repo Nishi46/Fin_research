@@ -62,7 +62,20 @@ Spec: `.planning/specs/holdout-carve-out.md` (owner decisions recorded there). P
   container that cannot read the holdout directory. Also add `permissions.deny` Read rules for
   the holdout directory in the Claude Code settings (owner action, once the path is chosen).
 
-Still open: nothing carves the holdout out of the data yet. That needs a data-split step that
+Built (2026-10-18, uncommitted): `harness/data/{window,split,holdout_store}.py`, `ActionsStore`
+in `cache.py`, the manifest-checking `HoldoutGate`, and `scripts/carve_holdout.py`, all tested on
+synthetic data only. NOT yet run on real data. Before the real carve, the owner must:
+- approve the symbol list (`--symbols`; the universe is the owner's decision),
+- `mkdir` the holdout directory outside the repo and set `FIN_RESEARCH_HOLDOUT_DIR` (the script
+  requires it to exist) and `LAB_DATA_CACHE_DIR`,
+- run `--dry-run` first and check the three windows,
+- remember the carve is irreversible and refuses to repeat.
+Known gaps: `ResearchWindow` can only clamp the date for index membership, so the research
+provider must be built from membership data that is already capped; and `HoldoutGate.evaluate`
+takes a caller-supplied runner that receives the holdout path, so the runner must be built by the
+harness, never the proposer (the OS-level isolation above is what really closes this).
+
+Original gap (now built): nothing carved the holdout out of the data. That needs a data-split step that
 reserves the last `holdout_years` of the pinned snapshot outside the repository (the holdout
 directory), with an embargo gap between the research window and the holdout for multi-bar labels,
 and the research side must be unable to read it. Spec this before the Phase 1 lock.

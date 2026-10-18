@@ -20,6 +20,17 @@ without running anything. New code is a new trial and gets its own single query.
 Each new code version still leaks one bit, so the ledger also bounds the total: once
 `holdout_max_queries` verdicts are recorded (across all strategies), the gate refuses new code
 until the owner raises the cap. Replays and runner errors do not spend a query.
+
+The verdict window is defined by the directory's manifest, never by the caller. Before anything
+is read or run, `verify_holdout_dir` checks the directory (mode 0700, manifest present, content
+hash matches); any `HoldoutStoreError` propagates, so a directory without a valid manifest is
+refused and nothing is scored or recorded. The backtest also covers the embargo and warm-up
+bars that lie before `holdout_start`; only returns whose New York session date falls in
+[`holdout_start`, `holdout_end`] are scored.
+
+The `run` callable receives the holdout path, so it must be constructed by the harness (the
+pipeline) and never supplied by the proposer. Software cannot enforce that alone: OS-level
+isolation of the holdout from the proposer is the plan before build step 5.
 """
 
 import json
@@ -27,16 +38,19 @@ import math
 import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from harness.api import BacktestResult
+from harness.data.holdout_store import verify_holdout_dir
 from harness.thresholds import DEFAULT_THRESHOLDS
 
 HOLDOUT_ENV_VAR = "FIN_RESEARCH_HOLDOUT_DIR"
 LEDGER_NAME = "holdout_ledger.jsonl"
 MIN_RETURNS = 2
+_NY = ZoneInfo("America/New_York")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -114,6 +128,7 @@ class HoldoutGate:
     ) -> HoldoutVerdict:
         """Run `run(holdout_dir)` once per code version and return pass or fail."""
         directory = resolve_holdout_dir(self._environ)
+        manifest = verify_holdout_dir(directory)
         ledger = directory / LEDGER_NAME
         recorded = self._lookup(ledger, strategy_id, code_hash)
         if recorded is not None:
@@ -123,7 +138,15 @@ class HoldoutGate:
                 f"the holdout allows {self._max_queries} queries in total and all are used"
             )
 
-        passed = holdout_t_statistic(run(directory).daily_returns) >= self._min_t_stat
+        backtest = run(directory)
+        if len(backtest.timestamps) != len(backtest.daily_returns):
+            raise ValueError("timestamps and daily_returns must have the same length")
+        scored = [
+            r
+            for ts, r in zip(backtest.timestamps, backtest.daily_returns, strict=True)
+            if manifest.holdout_start <= ts.astimezone(_NY).date() <= manifest.holdout_end
+        ]
+        passed = holdout_t_statistic(scored) >= self._min_t_stat
         entry = {"strategy_id": strategy_id, "code_hash": code_hash, "passed": passed}
         with ledger.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")

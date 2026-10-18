@@ -1,17 +1,18 @@
 """Parquet cache, one file per symbol, with incremental fetch."""
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd  # type: ignore[import-untyped]
 
-from contracts.data import Bar
+from contracts.data import Bar, CorporateAction, CorporateActionKind
 
 Fetcher = Callable[[str, datetime | None, datetime], list[Bar]]
 _SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 _COLUMNS = ["symbol", "ts", "open", "high", "low", "close", "volume"]
+_ACTION_COLUMNS = ["symbol", "kind", "effective_at", "value"]
 
 
 class ParquetCache:
@@ -68,3 +69,43 @@ class ParquetCache:
             if fresh:
                 self.store(symbol, cached)
         return [b for b in cached if b.ts <= end]
+
+
+class ActionsStore:
+    """All corporate actions in one parquet file, rewritten whole on every store."""
+
+    def __init__(self, root: Path) -> None:
+        self._path = root / "actions.parquet"
+
+    def load(self) -> list[CorporateAction]:
+        if not self._path.exists():
+            return []
+        frame = pd.read_parquet(self._path)
+        return [
+            CorporateAction(
+                symbol=str(r.symbol),
+                kind=CorporateActionKind(str(r.kind)),
+                effective_at=pd.Timestamp(r.effective_at).to_pydatetime(),
+                value=float(r.value),
+            )
+            for r in frame.itertuples(index=False)
+        ]
+
+    def store(self, actions: Sequence[CorporateAction]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        ordered = sorted(actions, key=lambda a: (a.effective_at, a.symbol, a.kind.value))
+        frame = pd.DataFrame(
+            [
+                {
+                    "symbol": a.symbol,
+                    "kind": a.kind.value,
+                    "effective_at": a.effective_at,
+                    "value": a.value,
+                }
+                for a in ordered
+            ],
+            columns=_ACTION_COLUMNS,
+        )
+        frame["effective_at"] = pd.to_datetime(frame["effective_at"], utc=True)
+        frame["value"] = frame["value"].astype("float64")
+        frame.to_parquet(self._path, index=False)

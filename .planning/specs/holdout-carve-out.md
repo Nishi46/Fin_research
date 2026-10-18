@@ -43,7 +43,7 @@ Sessions come from `harness.data.calendar`, not weekdays.
 
 **R2. One-time carve, refuses to repeat.** `scripts/carve_holdout.py`, run by the owner from their terminal (never by an agent), reads the pinned snapshot, writes the holdout side, then writes the research side. If a manifest already exists in the holdout directory it exits non-zero and changes nothing. A "re-carve" is not an option: moving the boundary releases ex-holdout data to research and voids the query cap.
 
-**R3. Holdout side.** Written under `FIN_RESEARCH_HOLDOUT_DIR` (reuses `resolve_holdout_dir`: set, exists, outside the repo): bars and corporate actions for `[research_end + 1 session, holdout_end]` (embargo plus holdout, so a strategy has warm-up bars), plus `holdout_manifest.json`. The directory must not be group- or world-readable (mode 0700); the carve sets it, and `HoldoutGate` refuses a looser mode.
+**R3. Holdout side.** Written under `FIN_RESEARCH_HOLDOUT_DIR` (reuses `resolve_holdout_dir`: set, exists, outside the repo): bars and corporate actions for `[research_end + 1 session, holdout_end]` (embargo plus holdout), plus `holdout_manifest.json`. *(Amended 2026-10-18: ten embargo sessions cannot warm up a 200-day indicator, so a holdout run builds its provider from the research data, which is not secret, plus this directory, adjusted once at `holdout_end` (`holdout_provider`). The directory itself holds only embargo and holdout sessions.)* The directory must not be group- or world-readable (mode 0700); the carve sets it, and `HoldoutGate` refuses a looser mode.
 
 **R4. Manifest.** `holdout_manifest.json`, written once, contains: source snapshot id, `research_end`, `holdout_start`, `holdout_end`, `holdout_years`, `embargo_sessions`, a content hash of the holdout files, carve time (UTC), and the code version. The window dates are not secret (the holdout is "the last two years"); the bar contents are.
 
@@ -51,11 +51,11 @@ Sessions come from `harness.data.calendar`, not weekdays.
 
 **R6. Gate scores only the holdout window.** `HoldoutGate.evaluate` reads the manifest, and the t-statistic uses only the returns whose timestamp is >= `holdout_start`. Embargo-period returns are dropped. Warm-up bars before `holdout_start` may be used by the strategy but never scored. A missing or altered manifest (content hash mismatch) makes the gate refuse.
 
-**R7. Adjustment does not cross the boundary.** Both sides store raw (unadjusted) bars plus corporate actions and adjust on read, per window. Research reads adjust using only actions with ex-date <= `research_end`. A holdout run adjusts warm-up, embargo and holdout bars together using actions up to `holdout_end`, so they share one basis. The plan must check how far `harness/data/adjust.py` and the cache assume pre-adjusted bars (owner decision 2).
+**R7. Adjustment does not cross the boundary.** Both sides store raw (unadjusted) bars plus corporate actions and adjust on read, per window. Research reads adjust using only actions with ex-date <= `research_end`. A holdout run adjusts warm-up, embargo and holdout bars together using actions up to `holdout_end`, so they share one basis. *(Amended 2026-10-18: checked. `ComposedDataProvider` already adjusts raw bars with actions point-in-time at read time and `ParquetCache` already stores raw bars, so no refactor was needed. The only gap was persisting actions, added as `ActionsStore`.)*
 
 **R8. Fail closed.** The carve refuses, with a clear message, if: the source snapshot fails the existing quality and reconciliation checks; the research side would be shorter than the pipeline's minimum history (walk-forward plus floors); the holdout side has fewer returns than `holdout_years * 252 * 0.9`; or any symbol's bars are not strictly ordered or deduplicated.
 
-**R9. Registry visibility.** Each trial records the research snapshot id and the three window dates. Detailed holdout metrics still never leave `evaluate` (unchanged).
+**R9. Registry visibility.** Each trial records the research snapshot id. Detailed holdout metrics still never leave `evaluate` (unchanged). *(Amended 2026-10-18: no new registry fields, since that would change a frozen contract. A research provider built from capped data has `snapshot.end == research_end`, so the research window is recorded through the existing `data_snapshot_id`; the holdout dates live in the manifest.)*
 
 ### Nice to have
 

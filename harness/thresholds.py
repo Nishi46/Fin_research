@@ -53,6 +53,12 @@ class Thresholds(BaseModel):
     # allows 20 queries in total (each new code version spends one) before it refuses.
     holdout_years: int = Field(default=2, ge=1)
     holdout_max_queries: int = Field(default=20, ge=1)
+    # Holdout carve-out (owner approved 2026-10-18). Embargo = 2x the longest 5-day hold, so no
+    # research label or position can span the boundary. The holdout must contain at least this
+    # fraction of its expected sessions, and research needs a minimum history to be worth grading.
+    holdout_embargo_sessions: int = Field(default=10, ge=1)
+    holdout_min_session_fraction: float = Field(default=0.9, gt=0.0, le=1.0)
+    holdout_min_research_years: int = Field(default=3, ge=1)
     # Data reconciliation between sources. Calibrated 2026-10-18 (owner approved) from Alpaca (IEX)
     # vs yfinance on 10 large caps over 3 years (scripts.reconcile_sources): p99.9 of per-bar
     # differences was 0.88% and 4 of 7500 bars exceeded 1%. The price tolerance stays above the
