@@ -59,11 +59,12 @@ class Thresholds(BaseModel):
     holdout_embargo_sessions: int = Field(default=10, ge=1)
     holdout_min_session_fraction: float = Field(default=0.9, gt=0.0, le=1.0)
     holdout_min_research_years: int = Field(default=3, ge=1)
-    # Data reconciliation between sources. Calibrated 2026-10-18 (owner approved) from Alpaca (IEX)
-    # vs yfinance on 10 large caps over 3 years (scripts.reconcile_sources): p99.9 of per-bar
-    # differences was 0.88% and 4 of 7500 bars exceeded 1%. The price tolerance stays above the
-    # IEX-vs-consolidated noise but far below real errors (splits, bad ticks); the disagree
-    # fraction is about 10x the observed rate. Recalibrate when the universe widens.
+    # Data reconciliation between sources. Calibrated 2026-10-18 (owner approved) on Alpaca IEX vs
+    # yfinance, 10 large caps, 3 years: p99.9 of per-bar differences 0.88%, 4 of 7500 bars over 1%.
+    # Re-checked the same day on the SIP feed (now the default), 45 symbols, 2016-2026: median
+    # difference 0.00%, p99 0.05%, about 0.02% of bars over 1%. The price tolerance stays far
+    # below real errors (splits, bad ticks); the disagree fraction is 10x or more above observed.
+    # Recalibrate when the universe widens.
     reconcile_price_tolerance: float = Field(default=0.01, gt=0.0, lt=1.0)
     reconcile_max_disagree_fraction: float = Field(default=0.005, ge=0.0, lt=1.0)
     reconcile_min_overlap: float = Field(default=0.9, gt=0.0, le=1.0)

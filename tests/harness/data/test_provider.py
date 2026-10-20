@@ -4,7 +4,8 @@ import pytest
 
 from contracts.data import CorporateAction, CorporateActionKind
 from contracts.dataview import DataView
-from harness.data.crosscheck import StooqCrossChecker
+from harness.data.common import SpinOff
+from harness.data.crosscheck import StooqCrossChecker, YFinanceCrossChecker
 from harness.data.factories import PROVIDER_FACTORIES
 from harness.data.membership import IndexHistory, PointInTimeMembership
 from harness.data.provider import ComposedDataProvider
@@ -91,3 +92,95 @@ def test_membership_delegates() -> None:
     pit = PointInTimeMembership({"X": IndexHistory(current=frozenset({"AAA"}), changes=())})
     p = ComposedDataProvider(normal_series(), membership=pit)
     assert p.membership("X", date(2026, 1, 5)) == frozenset({"AAA"})
+
+
+def _yahoo_rows(bars: list) -> list[dict[str, object]]:  # type: ignore[type-arg]
+    """yfinance with auto_adjust=False: split-adjusted closes, dividends NOT applied."""
+    return [
+        {
+            "Date": b.ts.date().isoformat(),
+            "Open": b.open,
+            "High": b.high,
+            "Low": b.low,
+            "Close": b.close,
+            "Volume": b.volume,
+        }
+        for b in bars
+    ]
+
+
+def test_reconciliation_ignores_dividends_because_yahoo_close_is_not_dividend_adjusted() -> None:
+    # Regression: the real carve compared dividend-adjusted prices with Yahoo's split-only Close,
+    # so every bar before a dividend looked wrong and 76% of bars "disagreed" on real data.
+    bars = series("AAA", [100.0] * 40, start=date(2026, 1, 5))
+    dividend = CorporateAction(
+        symbol="AAA", kind=CorporateActionKind.DIVIDEND, effective_at=bars[30].ts, value=3.0
+    )
+    checker = YFinanceCrossChecker(lambda s, a, b: _yahoo_rows(bars))
+    provider = ComposedDataProvider(bars, corporate_actions=[dividend], cross_checkers=[checker])
+    assert provider.snapshot().id.startswith("sha256:")
+
+
+def test_reconciliation_still_applies_splits() -> None:
+    raw = raw_split_series()
+    split_adjusted = ComposedDataProvider(raw, corporate_actions=[_split()]).bars(
+        ["SPL"], raw[-1].ts
+    )
+    checker = YFinanceCrossChecker(lambda s, a, b: _yahoo_rows(list(split_adjusted)))
+    provider = ComposedDataProvider(raw, corporate_actions=[_split()], cross_checkers=[checker])
+    assert provider.snapshot().id.startswith("sha256:")
+
+
+def test_reconciliation_still_rejects_a_real_disagreement_with_dividends_present() -> None:
+    bars = series("AAA", [100.0] * 40, start=date(2026, 1, 5))
+    dividend = CorporateAction(
+        symbol="AAA", kind=CorporateActionKind.DIVIDEND, effective_at=bars[30].ts, value=3.0
+    )
+    wrong = [
+        {**row, "Open": 120.0, "High": 120.0, "Low": 120.0, "Close": 120.0}
+        for row in _yahoo_rows(bars)
+    ]
+    checker = YFinanceCrossChecker(lambda s, a, b: wrong)
+    provider = ComposedDataProvider(bars, corporate_actions=[dividend], cross_checkers=[checker])
+    with pytest.raises(SnapshotRejected):
+        provider.snapshot()
+
+
+def _spin_off(symbol: str, ex_date: date) -> SpinOff:
+    return SpinOff(source_symbol=symbol, ex_date=ex_date, new_symbol="NEWCO", new_rate=0.25)
+
+
+def test_strict_rejects_spin_off_inside_range_and_names_symbols() -> None:
+    bars = [*normal_series("GE"), *normal_series("HON"), *normal_series("CLEAN")]
+    mid = bars[10].ts.date()
+    p = ComposedDataProvider(
+        bars, strict=True, spin_offs=[_spin_off("HON", mid), _spin_off("GE", mid)]
+    )
+    assert [i.kind for i in p.quality_issues] == ["spin_off", "spin_off"]
+    with pytest.raises(SnapshotRejected, match=r"spin_off \(GE, HON\)"):
+        p.snapshot()
+
+
+def test_strict_passes_spin_off_outside_range_or_unknown_symbol() -> None:
+    bars = normal_series("AAA")
+    p = ComposedDataProvider(
+        bars,
+        strict=True,
+        spin_offs=[_spin_off("AAA", date(2030, 1, 2)), _spin_off("ZZZ", bars[5].ts.date())],
+    )
+    assert p.quality_issues == []
+    assert p.snapshot().id.startswith("sha256:")
+
+
+def test_non_strict_keeps_spin_off_issue_but_snapshots() -> None:
+    bars = normal_series("AAA")
+    p = ComposedDataProvider(bars, spin_offs=[_spin_off("AAA", bars[10].ts.date())])
+    assert [i.kind for i in p.quality_issues] == ["spin_off"]
+    assert p.snapshot().id.startswith("sha256:")
+
+
+def test_strict_message_keeps_plain_kinds_format_for_other_issues() -> None:
+    with pytest.raises(
+        SnapshotRejected, match=r"data quality issues: suspect_jump, unrecorded_split$"
+    ):
+        ComposedDataProvider(raw_split_series(), strict=True).snapshot()

@@ -1,0 +1,38 @@
+{
+  "_note": "SYNTHETIC: shaped like the Alpaca corporate-actions spin_off response. Fake symbols except multi_row, which only looks real.",
+  "page1": {
+    "corporate_actions": {
+      "spin_offs": [
+        {"ex_date": "2026-03-10", "new_rate": 0.5, "new_symbol": "CHILD", "process_date": "2026-03-10", "source_symbol": "PARENT"}
+      ]
+    },
+    "next_page_token": "TOKEN2"
+  },
+  "page2": {
+    "corporate_actions": {
+      "spin_offs": [
+        {"ex_date": "2026-01-15", "new_rate": 0.25, "new_symbol": "KIDCO", "process_date": "2026-01-15", "source_symbol": "MOMCO", "source_rate": 1.0}
+      ]
+    },
+    "next_page_token": null
+  },
+  "multi_row": {
+    "corporate_actions": {
+      "spin_offs": [
+        {"ex_date": "2025-10-30", "new_rate": 0.25, "new_symbol": "SOLS", "process_date": "2025-10-30", "source_symbol": "HON"},
+        {"ex_date": "2025-04-01", "new_rate": 1.0, "new_symbol": "GEV", "process_date": "2025-04-01", "source_symbol": "GE"},
+        {"ex_date": "2025-04-01", "new_rate": 0.2, "new_symbol": "AAAC", "process_date": "2025-04-01", "source_symbol": "AAAP"}
+      ]
+    },
+    "next_page_token": null
+  },
+  "empty": {"corporate_actions": {}, "next_page_token": null},
+  "malformed": {
+    "corporate_actions": {
+      "spin_offs": [
+        {"ex_date": "2026-03-10", "new_symbol": "CHILD", "process_date": "2026-03-10", "source_symbol": "PARENT"}
+      ]
+    },
+    "next_page_token": null
+  }
+}

@@ -58,7 +58,7 @@ The owner changes account size from the website and the system adapts. Details i
 ## Stock-specific traps the harness must handle
 
 - **Survivorship bias:** free data has no prices for delisted names, so it can't be eliminated. Reconstruct point-in-time index membership, prefer ETFs, tag every stock-universe result `survivorship_biased=True`, apply a haircut, and never call such a result clean. Paper forward testing is the real gate.
-- **Free-data quality:** cross-check sources, run split/dividend sanity checks, detect gaps and stale bars, fail snapshots that disagree. Free feeds can under-report volume (IEX-only), so liquidity caps need consolidated volume or conservative scaling. History is short (~2016+), so report which regimes the window covers.
+- **Free-data quality:** cross-check sources, run split/dividend sanity checks, detect gaps and stale bars, fail snapshots that disagree. Free feeds can under-report volume (IEX-only), so liquidity caps need consolidated volume or conservative scaling. The default Alpaca feed is the consolidated SIP tape, which the free tier serves for daily bars from 2016-01-04 (queries must end 15+ minutes ago); the IEX-only feed has gaps, starts about 2020-07 and shows roughly 1/60 of the volume (measured 2026-10-18). History is still short, so report which regimes the window covers.
 - **Corporate actions:** correct split/dividend adjustment (a 2-for-1 must not look like a 50% crash).
 - **Overnight gaps:** stops fill at the next available price, not the stop price. Flag or exclude holds across earnings.
 - **Lookahead:** truncate data at time t; signals at t must equal those from the full dataset. Watch off-by-one `shift` and using a bar's close before it exists.

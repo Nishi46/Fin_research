@@ -8,13 +8,14 @@ this was written; verify against the live docs before first real use.
 import json
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from contracts.data import Bar, CorporateAction, CorporateActionKind
 from harness.data.calendar import session_close_utc
+from harness.data.common import SpinOff
 from harness.data.config import DataConfig
 from harness.data.ratelimit import RateLimiter
 
@@ -58,10 +59,18 @@ def _ex_date(text: str) -> datetime:
 
 
 class AlpacaDataClient:
-    def __init__(self, http: HttpClient, config: DataConfig, limiter: RateLimiter) -> None:
+    def __init__(
+        self,
+        http: HttpClient,
+        config: DataConfig,
+        limiter: RateLimiter,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         self._http = http
         self._config = config
         self._limiter = limiter
+        self._clock = clock
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -84,6 +93,10 @@ class AlpacaDataClient:
                 return pages
 
     def fetch_bars(self, symbols: Sequence[str], start: datetime, end: datetime) -> list[Bar]:
+        # Never ask for today: its daily bar is still forming and would be stamped as a full
+        # session close, and the SIP feed refuses queries ending within 15 minutes of now.
+        today = self._clock().astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = min(end, today)
         params = {
             "symbols": ",".join(symbols),
             "timeframe": "1Day",
@@ -145,3 +158,30 @@ class AlpacaDataClient:
                     )
                 )
         return sorted(actions, key=lambda a: (a.effective_at, a.symbol))
+
+    def fetch_spin_offs(
+        self, symbols: Sequence[str], start: datetime, end: datetime
+    ) -> list[SpinOff]:
+        params = {
+            "symbols": ",".join(symbols),
+            "types": "spin_off",
+            "start": start.date().isoformat(),
+            "end": end.date().isoformat(),
+            "limit": ACTIONS_PAGE_LIMIT,
+        }
+        spin_offs: list[SpinOff] = []
+        for page in self._pages(
+            self._config.data_url + self._config.corporate_actions_path, params
+        ):
+            grouped = page.get("corporate_actions") or {}
+            # Malformed rows raise on purpose: a silently dropped spin-off defeats the guard.
+            for row in grouped.get("spin_offs", []):
+                spin_offs.append(
+                    SpinOff(
+                        source_symbol=row["source_symbol"],
+                        ex_date=date.fromisoformat(row["ex_date"]),
+                        new_symbol=row["new_symbol"],
+                        new_rate=float(row["new_rate"]),
+                    )
+                )
+        return sorted(spin_offs, key=lambda s: (s.ex_date, s.source_symbol))

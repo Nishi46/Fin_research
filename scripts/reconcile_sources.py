@@ -29,6 +29,7 @@ from harness.data.config import DataConfig
 from harness.data.ratelimit import RateLimiter
 from harness.data.reconcile import ReconciliationReport, reconcile
 from harness.data.yfinance_fetcher import make_yfinance_fetcher
+from harness.thresholds import DEFAULT_THRESHOLDS
 
 DEFAULT_SYMBOLS = ("SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "JPM", "XOM", "TSLA")
 DEFAULT_YEARS = 3
@@ -85,6 +86,23 @@ def summarize(diffs: Sequence[Difference]) -> list[str]:
     return lines
 
 
+def per_symbol_report(
+    primary: Sequence[Bar], diffs: Sequence[Difference], *, tolerance: float
+) -> list[str]:
+    """One line per symbol: bars, first/last day, and how many differ beyond the tolerance."""
+    days: dict[str, list[date]] = {}
+    for bar in primary:
+        days.setdefault(bar.symbol, []).append(bar.ts.date())
+    bad: dict[str, int] = {}
+    for d in diffs:
+        if d.relative > tolerance:
+            bad[d.symbol] = bad.get(d.symbol, 0) + 1
+    return [
+        f"{symbol}: {len(ds)} bars {min(ds)}..{max(ds)}, {bad.get(symbol, 0)} beyond tolerance"
+        for symbol, ds in sorted(days.items())
+    ]
+
+
 def render_report(report: ReconciliationReport) -> list[str]:
     verdict = "PASS" if report.ok else f"FAIL ({report.reason})"
     return [
@@ -117,8 +135,13 @@ def run(env: Mapping[str, str], symbols: Sequence[str], years: int) -> int:
     report = reconcile(primary, other, source="yfinance")
     for line in render_report(report):
         print(line)
-    for line in summarize(relative_differences(primary, other)):
+    diffs = relative_differences(primary, other)
+    for line in summarize(diffs):
         print(line)
+    print("per symbol:")
+    tolerance = DEFAULT_THRESHOLDS.reconcile_price_tolerance
+    for line in per_symbol_report(primary, diffs, tolerance=tolerance):
+        print(f"  {line}")
     return 0 if report.ok else 1
 
 

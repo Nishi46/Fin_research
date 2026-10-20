@@ -33,6 +33,7 @@ from contracts.data import Bar, CorporateAction
 from harness.data.alpaca import AlpacaDataClient, UrllibHttpClient
 from harness.data.cache import ActionsStore, ParquetCache
 from harness.data.calendar import trading_sessions
+from harness.data.common import SpinOff
 from harness.data.config import DataConfig
 from harness.data.crosscheck import YFinanceCrossChecker
 from harness.data.holdout_store import (
@@ -62,6 +63,7 @@ _UTC_MIDNIGHT_ACTIONS = UTC
 
 FetchBars = Callable[[Sequence[str], datetime, datetime], list[Bar]]
 FetchActions = Callable[[Sequence[str], datetime, datetime], list[CorporateAction]]
+FetchSpinOffs = Callable[[Sequence[str], datetime, datetime], list[SpinOff]]
 
 
 def _bar_session(bar: Bar) -> date:
@@ -146,6 +148,7 @@ def carve(
     cache_dir: Path,
     fetch_bars: FetchBars,
     fetch_actions: FetchActions,
+    fetch_spin_offs: FetchSpinOffs,
     cross_checkers: Sequence[CrossChecker],
     now: datetime,
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
@@ -163,12 +166,17 @@ def carve(
     start = now - timedelta(days=365 * years)
     bars = fetch_bars(symbols, start, now)
     actions = fetch_actions(symbols, start, now)
+    spin_offs = fetch_spin_offs(symbols, start, now)
     if not bars:
         out("refused: no bars fetched")
         return 1
 
     provider = ComposedDataProvider(
-        bars, corporate_actions=actions, cross_checkers=cross_checkers, strict=True
+        bars,
+        corporate_actions=actions,
+        cross_checkers=cross_checkers,
+        strict=True,
+        spin_offs=spin_offs,
     )
     try:
         snapshot_id = provider.snapshot().id
@@ -263,6 +271,7 @@ def _run(env: Mapping[str, str], symbols: list[str], args: argparse.Namespace) -
         cache_dir=config.cache_dir,
         fetch_bars=alpaca.fetch_bars,
         fetch_actions=alpaca.fetch_corporate_actions,
+        fetch_spin_offs=alpaca.fetch_spin_offs,
         cross_checkers=checkers,
         now=datetime.now(UTC),
         dry_run=args.dry_run,

@@ -7,6 +7,7 @@ import pytest
 from contracts.data import Bar, CorporateAction
 from harness.data.cache import ActionsStore, ParquetCache
 from harness.data.calendar import session_close_utc
+from harness.data.common import SpinOff
 from harness.data.holdout_store import MANIFEST_NAME, load_manifest, verify_holdout_dir
 from harness.data.reconcile import ReconcileConfig, ReconciliationReport
 from harness.data.window import compute_windows
@@ -53,9 +54,15 @@ class _Checker:
 
 
 class _Fetch:
-    def __init__(self, bars: list[Bar], actions: list[CorporateAction] | None = None) -> None:
+    def __init__(
+        self,
+        bars: list[Bar],
+        actions: list[CorporateAction] | None = None,
+        spin_offs: list[SpinOff] | None = None,
+    ) -> None:
         self.bars = bars
         self.actions = actions or []
+        self.spin_offs = spin_offs or []
         self.calls = 0
 
     def fetch_bars(self, symbols: Sequence[str], start: datetime, end: datetime) -> list[Bar]:
@@ -67,6 +74,12 @@ class _Fetch:
     ) -> list[CorporateAction]:
         self.calls += 1
         return list(self.actions)
+
+    def fetch_spin_offs(
+        self, symbols: Sequence[str], start: datetime, end: datetime
+    ) -> list[SpinOff]:
+        self.calls += 1
+        return list(self.spin_offs)
 
 
 def _run(
@@ -88,6 +101,7 @@ def _run(
         cache_dir=tmp_path / "cache",
         fetch_bars=fetch.fetch_bars,
         fetch_actions=fetch.fetch_actions,
+        fetch_spin_offs=fetch.fetch_spin_offs,
         cross_checkers=list(checkers),
         now=now or _now_for(bars),
         thresholds=thresholds,
@@ -178,6 +192,37 @@ def test_rerun_refuses_without_any_fetch(tmp_path: Path) -> None:
     assert any("already carved" in x.lower() for x in lines)
     after = {p: p.read_bytes() for p in (tmp_path / "hold").rglob("*") if p.is_file()}
     assert before == after
+
+
+def _spin(symbol: str, ex_date: date) -> SpinOff:
+    return SpinOff(source_symbol=symbol, ex_date=ex_date, new_symbol="NEWCO", new_rate=0.25)
+
+
+def _tree(root: Path) -> dict[Path, bytes]:
+    return {p: p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_spin_off_inside_window_refuses_and_writes_nothing(tmp_path: Path, dry_run: bool) -> None:
+    bars = _bars()
+    cache = tmp_path / "cache"
+    ParquetCache(cache).store("OLD", series("OLD", _closes(30, 20.0), start=START))
+    before = _tree(tmp_path)
+    ex = sorted({b.ts.date() for b in bars})[200]
+    fetch = _Fetch(bars, spin_offs=[_spin("BBB", ex)])
+    code, _, lines = _run(tmp_path, bars, fetch=fetch, dry_run=dry_run)
+    assert code == 1
+    assert any("spin_off (BBB)" in x for x in lines)
+    assert _tree(tmp_path) == before
+    assert not (tmp_path / "hold").exists()
+
+
+def test_spin_off_outside_universe_or_window_is_ignored(tmp_path: Path) -> None:
+    bars = _bars()
+    ex = sorted({b.ts.date() for b in bars})[200]
+    spins = [_spin("ZZZ", ex), _spin("AAA", START - timedelta(days=400))]
+    code, _, _ = _run(tmp_path, bars, fetch=_Fetch(bars, spin_offs=spins))
+    assert code == 0
 
 
 def test_reconciliation_failure_aborts_before_any_write(tmp_path: Path) -> None:

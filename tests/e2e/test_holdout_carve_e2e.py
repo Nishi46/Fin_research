@@ -177,6 +177,7 @@ def _carve(root: Path, bars: list[Bar]) -> tuple[int, list[str]]:
         cache_dir=root / "cache",
         fetch_bars=lambda symbols, start, end: list(bars),
         fetch_actions=lambda symbols, start, end: [],
+        fetch_spin_offs=lambda symbols, start, end: [],
         cross_checkers=[],
         now=max(b.ts for b in bars) + timedelta(days=1),
         thresholds=LIGHT,

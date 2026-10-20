@@ -4,12 +4,12 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Protocol
 
-from contracts.data import Bar, CorporateAction, Snapshot
+from contracts.data import Bar, CorporateAction, CorporateActionKind, Snapshot
 from harness.api import Regime
 from harness.data.adjust import adjust_bars, find_unadjusted_jumps, find_unrecorded_splits
-from harness.data.common import Issue
+from harness.data.common import Issue, SpinOff
 from harness.data.membership import PointInTimeMembership
-from harness.data.quality import find_gaps, find_stale_bars
+from harness.data.quality import find_gaps, find_spin_offs, find_stale_bars
 from harness.data.reconcile import (
     ReconcileConfig,
     ReconciliationReport,
@@ -42,6 +42,7 @@ class ComposedDataProvider:
         cross_checkers: Sequence[CrossChecker] = (),
         reconcile_config: ReconcileConfig | None = None,
         strict: bool = False,
+        spin_offs: Sequence[SpinOff] = (),
     ) -> None:
         self._raw = sorted(bars, key=lambda b: (b.ts, b.symbol))
         self._actions = sorted(corporate_actions, key=lambda a: (a.effective_at, a.symbol))
@@ -54,14 +55,25 @@ class ComposedDataProvider:
             *find_stale_bars(self._raw),
             *find_unrecorded_splits(self._raw, self._actions),
             *find_unadjusted_jumps(adjust_bars(self._raw, self._actions)),
+            *find_spin_offs(self._raw, spin_offs),
         ]
 
     def snapshot(self) -> Snapshot:
         if self._strict and self.quality_issues:
             kinds = sorted({i.kind for i in self.quality_issues})
-            raise SnapshotRejected(f"data quality issues: {', '.join(kinds)}")
+            labels = [
+                f"{k} ({', '.join(sorted({i.symbol for i in self.quality_issues if i.kind == k}))})"
+                if k == "spin_off"
+                else k
+                for k in kinds
+            ]
+            raise SnapshotRejected(f"data quality issues: {', '.join(labels)}")
         if self._checkers:
-            adjusted = adjust_bars(self._raw, self._actions)
+            # Cross-source closes (Yahoo with auto_adjust=False) are split-adjusted but not
+            # dividend-adjusted, so compare on that basis; dividend-adjusted prices differ by the
+            # cumulative dividends and would make most bars of a long history "disagree".
+            splits = [a for a in self._actions if a.kind is CorporateActionKind.SPLIT]
+            adjusted = adjust_bars(self._raw, splits)
             symbols = sorted({b.symbol for b in self._raw})
             assert_reconciled([c.check(adjusted, symbols, self._config) for c in self._checkers])
         return build_snapshot(

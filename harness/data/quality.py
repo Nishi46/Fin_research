@@ -3,12 +3,14 @@
 import itertools
 from collections import defaultdict
 from collections.abc import Sequence
+from zoneinfo import ZoneInfo
 
 from contracts.data import Bar
 from harness.data.calendar import trading_sessions
-from harness.data.common import Issue
+from harness.data.common import Issue, SpinOff
 
 MIN_STALE_RUN = 2
+_NY = ZoneInfo("America/New_York")
 
 
 def _by_symbol(bars: Sequence[Bar]) -> dict[str, list[Bar]]:
@@ -57,3 +59,25 @@ def _flush(symbol: str, run: list[Bar], min_run: int) -> list[Issue]:
     if len(run) < min_run:
         return []
     return [Issue("stale", symbol, b.ts, "repeats prior bar or has zero volume") for b in run]
+
+
+def find_spin_offs(bars: Sequence[Bar], spin_offs: Sequence[SpinOff]) -> list[Issue]:
+    """Spin-offs whose ex-date falls inside the symbol's bar range (NY session dates, inclusive).
+
+    Raw prices are not adjusted for spin-offs, so such a symbol shows a fake drop.
+    """
+    ranges = {
+        symbol: (series[0].ts.astimezone(_NY).date(), series[-1].ts.astimezone(_NY).date())
+        for symbol, series in _by_symbol(bars).items()
+    }
+    issues: list[Issue] = []
+    for s in sorted(spin_offs, key=lambda x: (x.ex_date, x.source_symbol)):
+        span = ranges.get(s.source_symbol)
+        if span is None or not span[0] <= s.ex_date <= span[1]:
+            continue
+        detail = (
+            f"spin-off of {s.new_symbol} (rate {s.new_rate}) on {s.ex_date}: "
+            "raw prices are not adjusted for it"
+        )
+        issues.append(Issue("spin_off", s.source_symbol, None, detail))
+    return issues

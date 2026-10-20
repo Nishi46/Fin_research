@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_DATA_URL = "https://data.alpaca.markets"
-DEFAULT_FEED = "iex"
+# Consolidated tape: the free tier serves SIP daily bars from 2016-01-04 (queries must end more than
+# 15 minutes ago). IEX-only has gaps, history from about 2020-07 and roughly 1/60 of the volume.
+DEFAULT_FEED = "sip"
 DEFAULT_CALLS_PER_MINUTE = 200
 DEFAULT_CORPORATE_ACTIONS_PATH = "/v1/corporate-actions"
 

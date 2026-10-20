@@ -11,5 +11,11 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(~/lab-holdout/**)"
+    ]
   }
 }
+
