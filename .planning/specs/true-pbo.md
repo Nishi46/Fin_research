@@ -1,7 +1,7 @@
 # Spec: True PBO (Probability of Backtest Overfitting across trials)
 
 **Created**: 2026-10-19
-**Status**: design approved by the owner on 2026-10-19 (including the contract change and the unlock). Still open: the plan, the R7 runtime measurement before the three threshold values are frozen, and open question 3 (dedupe by code hash). Blocked on a session launched with `LAB_UNLOCK_PROTECTED=1` for the protected edits.
+**Status**: BUILT 2026-10-20 (see docs/FOLLOWUPS.md for measured results); design approved by the owner on 2026-10-19 (including the contract change and the unlock). Decided 2026-10-20: thresholds `pbo_min_trials = 30`, `pbo_max_peers = 200`, `pbo_n_blocks = 16` (R7 measured: 0.23s at 16 blocks and 201 columns); open question 3 answered, duplicates count as extra peers. Plan: .planning/plans/true-pbo.md. Unlock confirmed (session started with `LAB_UNLOCK_PROTECTED=1`).
 **Author**: Nishi Kantamneni
 **Epic**: none (precondition for build step 5, the proposer agent; see docs/FOLLOWUPS.md)
 
@@ -33,7 +33,7 @@ A PBO that is computed over the daily returns of many genuinely different trials
 
 **R5. Gate.** At the trial-adjusted stage, fail when PBO > `pbo_max` once the group has at least `pbo_min_trials` trials. Below that, record `pbo_gating = 0.0` and the reason (insufficient peers), as today. The existing neighbour-based number stays as an informational metric `pbo_neighbours`.
 
-**R6. New thresholds** in `harness/thresholds.py` (owner approves values): `pbo_min_trials`, `pbo_max_peers`, `pbo_n_blocks`. Proposed: 20, 200, 16.
+**R6. New thresholds** in `harness/thresholds.py` (owner approves values): `pbo_min_trials`, `pbo_max_peers`, `pbo_n_blocks`. Decided 2026-10-20: 30, 200, 16.
 
 **R7. Cost measured before it is chosen.** CSCV cost grows with the number of trials and with C(blocks, blocks/2) (12,870 combinations at 16 blocks). Measure runtime at 20, 100 and 200 trials before freezing `pbo_max_peers` and `pbo_n_blocks`.
 
@@ -91,7 +91,7 @@ None.
 1. **Fewer than `pbo_min_trials` peers:** no gate, reason recorded; never a silent pass of the gate's wording.
 2. **Group timestamps differ** (calendar change, partial data): refuse the append with a clear error; the trial still logs, with PBO "not computed".
 3. **Constant (zero-variance) series:** CSCV already gives Sharpe 0; test it.
-4. **Identical series from re-submitted code:** a re-run is a new trial (new id), so it enters the group again; PBO treats duplicates as extra peers. Document it, or dedupe by code hash.
+4. **Identical series from re-submitted code:** a re-run is a new trial (new id), so it enters the group again; PBO treats duplicates as extra peers (owner decision 2026-10-20, no dedupe).
 5. **Candidate with fewer rows than blocks:** not computed, recorded as such.
 6. **Return storage failure after the trial row is written:** the trial row stays (append-only); the trial has no series and is excluded from later PBOs; surfaced as a metric.
 7. **Race:** two trials appended at once to one group; ordering by `created_at` only affects which peers are the "most recent", not correctness.
@@ -112,6 +112,15 @@ None.
 
 ## Open questions for the owner
 
-1. Approve the contract change (R1) and the unlock to make it.
-2. Threshold values: `pbo_min_trials = 20`, `pbo_max_peers = 200`, `pbo_n_blocks = 16`, pending the R7 measurement.
-3. Dedupe re-submitted identical code by `code_hash` (edge 4), or let duplicates count as extra peers?
+All three were answered by the owner.
+
+1. ~~Approve the contract change (R1) and the unlock to make it.~~ Approved 2026-10-19.
+2. ~~Threshold values.~~ **Decided 2026-10-20: `pbo_min_trials = 30`, `pbo_max_peers = 200`,
+   `pbo_n_blocks = 16`.** 30 rather than the proposed 20 because the estimate is erratic on small peer
+   sets (pure noise gave PBO 0.99, 0.73 and 0.51 at 21, 101 and 201 columns). The R7 measurement: about
+   0.23 s per CSCV call at 16 blocks and 201 columns.
+3. ~~Dedupe re-submitted identical code?~~ **Decided 2026-10-20: no dedupe; re-submitted identical code
+   counts as an extra peer.** (An earlier answer on 2026-10-19 was "count it once"; the owner then
+   settled on extra peer, and the build follows that.) A re-run is a new trial with a new id and enters
+   the group again, so a submitter can add near-identical columns to a peer set. This is a known
+   weakness, not a feature: the lifetime holdout cap and DSR's trial count are the other defences.

@@ -9,7 +9,7 @@ from contracts.registry import Outcome, Stage
 from contracts.runtime import CommandKind, CommandStatus, RunStatus
 
 SQL_DIR = Path(__file__).resolve().parents[2] / "contracts" / "sql"
-TABLES = ["trials", "runs", "commands", "command_status_history"]
+TABLES = ["trials", "trial_returns", "runs", "commands", "command_status_history"]
 
 
 def sqlite_db() -> sqlite3.Connection:
@@ -28,6 +28,16 @@ def insert_trial(
         " metrics) VALUES (?, '2026-01-05T00:00:00Z', 's', 'h', '{}', '10000', 'USD', 'snap',"
         " 1, ?, ?, '{}')",
         (tid, stage, outcome),
+    )
+    return tid
+
+
+def insert_returns(conn: sqlite3.Connection) -> str:
+    tid = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO trial_returns (trial_id, group_key, n, payload, created_at)"
+        " VALUES (?, 'g', 1, x'00', '2026-01-05T00:00:00Z')",
+        (tid,),
     )
     return tid
 
@@ -65,6 +75,7 @@ def insert_history(conn: sqlite3.Connection, status: str = "pending") -> str:
 def test_insert_works_on_every_table() -> None:
     conn = sqlite_db()
     insert_trial(conn)
+    insert_returns(conn)
     insert_run(conn)
     insert_command(conn)
     insert_history(conn)
@@ -76,6 +87,7 @@ def test_insert_works_on_every_table() -> None:
 def test_update_and_delete_are_blocked(table: str) -> None:
     conn = sqlite_db()
     insert_trial(conn)
+    insert_returns(conn)
     insert_run(conn)
     insert_command(conn)
     insert_history(conn)
@@ -165,6 +177,7 @@ def test_upsert_cannot_rewrite_a_trial() -> None:
 @pytest.mark.parametrize(
     ("table", "key"),
     [
+        ("trial_returns", "trial_id"),
         ("runs", "event_id"),
         ("commands", "id"),
         ("command_status_history", "event_id"),
@@ -173,6 +186,7 @@ def test_upsert_cannot_rewrite_a_trial() -> None:
 def test_replace_is_blocked_on_every_table(table: str, key: str) -> None:
     conn = sqlite_db()
     existing = {
+        "trial_returns": insert_returns,
         "runs": insert_run,
         "commands": insert_command,
         "command_status_history": insert_history,
@@ -185,3 +199,10 @@ def test_replace_is_blocked_on_every_table(table: str, key: str) -> None:
             f" VALUES ({', '.join('?' for _ in columns)})",
             row,
         )
+
+
+def test_applying_the_ddl_twice_is_a_no_op() -> None:
+    conn = sqlite_db()
+    insert_trial(conn)
+    conn.executescript((SQL_DIR / "registry_sqlite.sql").read_text())
+    assert conn.execute("SELECT COUNT(*) FROM trials").fetchone()[0] == 1

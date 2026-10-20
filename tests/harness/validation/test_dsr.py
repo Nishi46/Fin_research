@@ -32,6 +32,7 @@ from harness.validation.dsr import (
     trial_adjusted_stage,
     trial_sharpe_variance,
 )
+from harness.validation.pbo import probability_of_backtest_overfitting
 from tests.helpers import make_trial
 
 T_START = datetime(2020, 1, 1, tzinfo=UTC)
@@ -185,30 +186,6 @@ def test_trial_sharpe_variance_reads_registry_metrics() -> None:
     assert trial_sharpe_variance(registry_with(1, [0.1])) is None  # need two to get a variance
 
 
-def test_stage_gates_on_pbo_when_trial_returns_are_given() -> None:
-    rng = np.random.default_rng(11)
-    edge = rng.normal(0.004, 0.01, size=800)
-    noise_matrix = rng.normal(0.0, 0.01, size=(1600, 12))
-    lenient = trial_adjusted_stage(
-        result_from(edge),
-        registry_with(1),
-        trial_returns=noise_matrix,
-        pbo_gating=True,
-        thresholds=Thresholds(pbo_max=1.0),
-    )
-    assert lenient.passed
-    assert 0.0 <= lenient.metrics["pbo"] <= 1.0
-    bad = trial_adjusted_stage(
-        result_from(edge),
-        registry_with(1),
-        trial_returns=noise_matrix,
-        pbo_gating=True,
-        thresholds=Thresholds(pbo_max=0.01),
-    )
-    assert not bad.passed
-    assert "pbo" in bad.reason.lower()
-
-
 def test_explicit_trial_count_overrides_the_registry_count() -> None:
     rng = np.random.default_rng(1)
     result = result_from(rng.normal(0.0008, 0.01, size=750))
@@ -224,69 +201,105 @@ def test_trials_without_a_real_sharpe_are_ignored_for_the_variance() -> None:
     assert trial_sharpe_variance(reg) == pytest.approx(float(np.var([0.1, 0.3], ddof=1)))
 
 
-def test_pbo_gates_only_when_strictly_above_the_maximum_and_opted_in() -> None:
-    rng = np.random.default_rng(2)
-    edge = rng.normal(0.004, 0.01, size=800)
-    matrix = rng.normal(0.0, 0.01, size=(1600, 6))
-    from harness.validation.pbo import probability_of_backtest_overfitting
+# --- cross-trial PBO: column 0 of `peer_returns` is the candidate -------------------------------
 
-    pbo = probability_of_backtest_overfitting(matrix)
-    at = trial_adjusted_stage(
-        result_from(edge),
-        registry_with(1),
-        trial_returns=matrix,
-        pbo_gating=True,
-        thresholds=Thresholds(pbo_max=pbo),
-    )
-    assert at.passed  # strictly above is required to fail
-    below = trial_adjusted_stage(
-        result_from(edge),
-        registry_with(1),
-        trial_returns=matrix,
-        pbo_gating=True,
-        thresholds=Thresholds(pbo_max=pbo - 0.01),
-    )
-    assert not below.passed
-    assert "pbo" in below.reason.lower()
-    assert below.metrics["pbo_computed"] == 1.0
-    assert below.metrics["pbo_gating"] == 1.0
+MIN_TRIALS = 6  # small for speed; the production default is 30
+SMALL = {"pbo_min_trials": MIN_TRIALS, "pbo_n_blocks": 8}
 
 
-def test_pbo_that_cannot_be_computed_fails_only_when_gating() -> None:
-    rng = np.random.default_rng(2)
-    edge = rng.normal(0.004, 0.01, size=800)
-    too_short = rng.normal(0.0, 0.01, size=(10, 4))
-    gating = trial_adjusted_stage(
-        result_from(edge), registry_with(1), trial_returns=too_short, pbo_gating=True
-    )
-    assert not gating.passed
-    assert "PBO cannot be computed" in gating.reason
-    assert gating.metrics["pbo_computed"] == 0.0
-    informational = trial_adjusted_stage(
-        result_from(edge), registry_with(1), trial_returns=too_short
-    )
-    assert informational.passed  # not gating: an uncomputable PBO does not fail the stage
-    assert informational.metrics["pbo_computed"] == 0.0
-    assert informational.metrics["pbo_gating"] == 0.0
+def peer_matrix(n_cols: int, *, seed: int = 2, rows: int = 800) -> np.ndarray:
+    return np.random.default_rng(seed).normal(0.0, 0.01, size=(rows, n_cols))
 
 
-def test_pbo_computed_is_zero_when_no_matrix_is_given() -> None:
-    rng = np.random.default_rng(2)
-    verdict = trial_adjusted_stage(result_from(rng.normal(0.004, 0.01, size=800)), registry_with(1))
-    assert verdict.metrics["pbo_computed"] == 0.0
+def edge_result(seed: int = 2) -> BacktestResult:
+    return result_from(np.random.default_rng(seed).normal(0.004, 0.01, size=800))
 
 
-def test_pbo_is_informational_by_default() -> None:
-    rng = np.random.default_rng(11)
-    edge = rng.normal(0.004, 0.01, size=800)
-    noise_matrix = rng.normal(0.0, 0.01, size=(1600, 12))
+def test_peer_pbo_gates_once_the_group_is_large_enough() -> None:
+    matrix = peer_matrix(MIN_TRIALS)
+    pbo = probability_of_backtest_overfitting(matrix, n_blocks=8)
+    strict = Thresholds(**SMALL, pbo_max=max(pbo - 0.01, 0.01))
     verdict = trial_adjusted_stage(
-        result_from(edge),
+        edge_result(), registry_with(1), peer_returns=matrix, thresholds=strict
+    )
+    assert not verdict.passed
+    assert "pbo" in verdict.reason.lower()
+    assert verdict.metrics["pbo"] == pytest.approx(pbo)
+    assert verdict.metrics["pbo_computed"] == 1.0
+    assert verdict.metrics["pbo_gating"] == 1.0
+    assert verdict.metrics["pbo_group_size"] == MIN_TRIALS
+
+
+def test_peer_pbo_fails_only_when_strictly_above_the_maximum() -> None:
+    matrix = peer_matrix(MIN_TRIALS)
+    pbo = probability_of_backtest_overfitting(matrix, n_blocks=8)
+    at = trial_adjusted_stage(
+        edge_result(),
         registry_with(1),
-        trial_returns=noise_matrix,
+        peer_returns=matrix,
+        thresholds=Thresholds(**SMALL, pbo_max=pbo),
+    )
+    assert at.passed
+
+
+def test_below_the_minimum_group_size_pbo_does_not_gate() -> None:
+    matrix = peer_matrix(MIN_TRIALS - 1)
+    verdict = trial_adjusted_stage(
+        edge_result(),
+        registry_with(1),
+        peer_returns=matrix,
+        thresholds=Thresholds(**SMALL, pbo_max=0.01),
+    )
+    assert verdict.passed
+    assert verdict.metrics["pbo_gating"] == 0.0
+    assert verdict.metrics["pbo_computed"] == 0.0
+    assert verdict.metrics["pbo_group_size"] == MIN_TRIALS - 1
+    assert "not gating" in verdict.reason
+    assert f"{MIN_TRIALS - 1} of {MIN_TRIALS}" in verdict.reason
+
+
+def test_a_group_that_cannot_be_computed_fails_closed_when_it_would_gate() -> None:
+    too_short = peer_matrix(MIN_TRIALS, rows=10)
+    verdict = trial_adjusted_stage(
+        edge_result(), registry_with(1), peer_returns=too_short, thresholds=Thresholds(**SMALL)
+    )
+    assert not verdict.passed
+    assert "PBO cannot be computed" in verdict.reason
+    assert verdict.metrics["pbo_computed"] == 0.0
+    assert verdict.metrics["pbo_gating"] == 1.0
+
+
+def test_no_peer_matrix_means_no_gate_and_the_note_is_reported() -> None:
+    verdict = trial_adjusted_stage(
+        edge_result(),
+        registry_with(1),
+        pbo_note="return series refused: timestamps differ",
+        thresholds=Thresholds(**SMALL),
+    )
+    assert verdict.passed
+    assert verdict.metrics["pbo_computed"] == 0.0
+    assert verdict.metrics["pbo_gating"] == 0.0
+    assert "timestamps differ" in verdict.reason
+
+
+def test_neighbour_pbo_is_informational_and_never_gates() -> None:
+    rng = np.random.default_rng(11)
+    verdict = trial_adjusted_stage(
+        result_from(rng.normal(0.004, 0.01, size=800)),
+        registry_with(1),
+        neighbour_returns=rng.normal(0.0, 0.01, size=(1600, 12)),
         thresholds=Thresholds(pbo_max=0.01),
     )
     assert verdict.passed
-    assert verdict.metrics["pbo"] > 0.01
-    assert verdict.metrics["pbo_computed"] == 1.0
+    assert verdict.metrics["pbo_neighbours"] > 0.01
+    assert verdict.metrics["pbo_neighbours_computed"] == 1.0
+    assert verdict.metrics["pbo_computed"] == 0.0  # the cross-trial PBO is a separate metric
     assert verdict.metrics["pbo_gating"] == 0.0
+
+
+def test_neighbour_pbo_that_cannot_be_computed_is_recorded_not_fatal() -> None:
+    verdict = trial_adjusted_stage(
+        edge_result(), registry_with(1), neighbour_returns=peer_matrix(4, rows=10)
+    )
+    assert verdict.passed
+    assert verdict.metrics["pbo_neighbours_computed"] == 0.0

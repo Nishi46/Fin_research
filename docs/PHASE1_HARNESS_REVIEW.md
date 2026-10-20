@@ -4,13 +4,31 @@ Prepared 2026-10-19 for the owner. This is a reading guide, not an approval. The
 decision after reviewing the diff; nothing here has been reviewed by anyone but its authors.
 
 Baseline: commit `db7c06e` (the original Phase 1 harness). Everything below changed in `harness/`
-after it. Run `git diff db7c06e -- harness` for the full diff (14 files, about 805 lines added).
+after it. Run `git diff db7c06e -- harness` for the full diff (about 18 files, 1,050 lines added,
+counting the PBO work).
 
-## Verification state (2026-10-19)
+**Row 0, read first: cross-trial PBO (new, 2026-10-20).** It also changes the protected contract
+surface, so review these together: `contracts/registry.py` (`ReturnSeries`, `append_returns`,
+`returns_for_group`), `contracts/sql/registry_{sqlite,postgres}.sql` (the SQLite file was edited to
+`IF NOT EXISTS` throughout; existing tables unchanged), `fakes/registry.py`,
+`harness/registry/{_db,sqlite}.py`, `harness/validation/{peers,dsr,pipeline}.py`,
+`harness/thresholds.py` (`pbo_min_trials=30`, `pbo_max_peers=200`, `pbo_n_blocks=16`). Things to check:
+the return series is append-only (triggers abort update, delete and replace); a candidate is excluded
+from its own peer set; the gate only applies once the group has 30 trials. Known property, not a bug:
+the 0.5 gate is noisy (it rejects 40 to 50 percent of pure-noise candidates and 8 to 15 percent of
+genuine Sharpe-1.0 edges; Sharpe 2.0 is essentially never rejected), and re-submitted identical code
+counts as an extra peer by owner decision.
 
-- `uv run pytest`: 1084 passed, 1 skipped (a membership leak test that cannot be written, see below).
+## Verification state (updated 2026-10-20)
+
+- `uv run pytest`: 1131 passed, 1 skipped (a membership leak test that cannot be written, see below)
+  and 1 failure that appears only in a session launched with `LAB_UNLOCK_PROTECTED=1`:
+  `test_config_ignores_the_process_environment` rejects any `LAB_*` variable. It passes (6/6 in that
+  file) with the variable unset. Run the suite from a normally launched session for the real result.
 - `ruff check`, `ruff format --check`, `mypy harness scripts`, `lint-imports` (5 contracts) all clean.
 - The holdout was carved on real data on 2026-10-19 and verified (`verify_holdout_dir`).
+- True PBO was built on 2026-10-20 (see row 0 below). Until it is committed, `git diff db7c06e` also
+  includes it.
 
 ## What changed, in the order I would read it
 
@@ -48,12 +66,21 @@ after it. Run `git diff db7c06e -- harness` for the full diff (14 files, about 8
   2016) are caught only by the Yahoo reconciliation.
 - **Data quirk.** A few SIP sessions carry a tiny-volume bar for many symbols and no check flags it.
 
-## Decision for the owner: lock before or after true PBO?
+## What is next (as of 2026-10-20)
 
-True PBO (`.planning/specs/true-pbo.md`) must change `harness/registry/`, `harness/validation/pbo.py`
-and `pipeline.py`, plus the protected `contracts/registry.py`. If `harness/` is locked first, building
-PBO needs a temporary unlock. If PBO lands first, the lock covers it too and the diff to review is
-larger but final. Recommendation: build and approve PBO, then review once and lock once.
+True PBO has landed, so the lock now covers everything and the diff to review is final. Order:
+
+1. **Commit** the PBO work from the unlocked session (it touches `contracts/`), then quit and relaunch
+   VS Code normally so the protections are back.
+2. **Review** the harness diff using the table above, starting with row 0 and `holdout.py`, and decide
+   whether anything needs changing first.
+3. **Lock** `harness/` (next section). After this, harness edits need an unlocked launch and a fresh
+   review. Doing the lock before the proposer exists is the point.
+4. **Proposer isolation** (`docs/PROPOSER_ISOLATION.md`): choose container or separate user and run its
+   verification checklist. Required before build step 5.
+5. **Build step 2**, the strategy interface stub (intents only), then the risk layer (step 3).
+
+The memory note also asks to confirm PBO is committed before build step 5.
 
 ## How to lock (owner action; the protected-paths file is itself protected)
 

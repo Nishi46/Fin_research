@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from contracts import CapitalConfig, Intent, Outcome, Stage
+from contracts import CapitalConfig, Intent, Outcome, ReturnSeries, Stage
 from contracts.data import Bar
 from contracts.dataview import DataView
 from fakes.data import InMemoryDataProvider
@@ -21,6 +21,7 @@ from harness.engine.runner import run_backtest
 from harness.thresholds import Thresholds
 from harness.validation import pipeline
 from harness.validation.floors import floors_stage
+from harness.validation.peers import group_key
 from harness.validation.pipeline import (
     INFINITY_CAP,
     PipelineResult,
@@ -355,9 +356,10 @@ def test_the_candidate_counts_exactly_once_in_the_trial_count(existing: int) -> 
 
 def test_pbo_is_computed_and_recorded_on_a_normal_run() -> None:
     result, _ = run()
-    assert result.trial.metrics["trial_adjusted.pbo_computed"] == 1.0
+    assert result.trial.metrics["trial_adjusted.pbo_neighbours_computed"] == 1.0
     assert result.trial.metrics["trial_adjusted.pbo_gating"] == 0.0
-    assert 0.0 <= result.trial.metrics["trial_adjusted.pbo"] <= 1.0
+    assert 0.0 <= result.trial.metrics["trial_adjusted.pbo_neighbours"] <= 1.0
+    assert result.trial.metrics["trial_adjusted.pbo_computed"] == 0.0  # no peers yet
 
 
 # --- trial contents ---------------------------------------------------------------------------
@@ -570,8 +572,9 @@ def run_scripted(
     neighbour_series: Callable[[Mapping[str, Any]], list[float]],
     thresholds: Thresholds = LENIENT,
     event_holds: int = 0,
+    registry: InMemoryRegistry | None = None,
 ) -> tuple[PipelineResult, InMemoryRegistry]:
-    registry = InMemoryRegistry()
+    registry = registry if registry is not None else InMemoryRegistry()
 
     def scripted_build(params: Mapping[str, Any]) -> Scripted:
         series = candidate if dict(params) == PARAMS else neighbour_series(params)
@@ -602,7 +605,7 @@ def seed_of(params: Mapping[str, Any]) -> int:
     return int(params["hold"]) * 100 + int(params["flat"])
 
 
-def test_pbo_above_the_maximum_is_recorded_but_does_not_gate(scripted: None) -> None:
+def test_neighbour_pbo_above_the_maximum_is_recorded_but_does_not_gate(scripted: None) -> None:
     half = N_DAYS // 2
     edge = 0.02
     candidate = [edge if i < half else -edge for i in range(N_DAYS)]  # wins early, loses late
@@ -614,7 +617,7 @@ def test_pbo_above_the_maximum_is_recorded_but_does_not_gate(scripted: None) -> 
     result, _ = run_scripted(
         candidate, neighbour, Thresholds(**{**LENIENT.model_dump(), "pbo_max": 0.5})
     )
-    assert result.trial.metrics["trial_adjusted.pbo"] > 0.5
+    assert result.trial.metrics["trial_adjusted.pbo_neighbours"] > 0.5
     assert result.trial.metrics["trial_adjusted.pbo_gating"] == 0.0
     adjusted = next(s for s in result.stages if s.stage is Stage.TRIAL_ADJUSTED)
     assert adjusted.passed  # DSR alone decides this stage
@@ -632,7 +635,7 @@ def test_a_dominant_candidate_has_low_pbo_but_fragile_neighbours_fail_stability(
     result, registry = run_scripted(
         candidate, neighbour, Thresholds(**{**LENIENT.model_dump(), "pbo_max": 0.5})
     )
-    assert result.trial.metrics["trial_adjusted.pbo"] < 0.5
+    assert result.trial.metrics["trial_adjusted.pbo_neighbours"] < 0.5
     assert result.stage_reached is Stage.STABILITY
     assert result.outcome is Outcome.REJECTED
     assert [s.stage for s in result.stages] == ORDER[:5]
@@ -781,3 +784,134 @@ def test_bars_after_end_from_a_leaky_provider_are_ignored() -> None:
     base_provider = make_provider(spy_closes=long_spy)
     result, _ = run(provider=Ignoring(list(base_provider._bars)))
     assert result.trial.metrics["floors.n_regimes"] == 1.0
+
+
+# --- cross-trial PBO: peers are earlier trials of the same group ---------------------------------
+
+PEER_MIN = 6
+PEER_THRESHOLDS = Thresholds(
+    **{**LENIENT.model_dump(), "pbo_min_trials": PEER_MIN, "pbo_n_blocks": 8, "pbo_max": 0.5}
+)
+EDGE = 0.02
+HALF = N_DAYS // 2
+WINS_EARLY = [EDGE if i < HALF else -EDGE for i in range(N_DAYS)]
+
+
+def scripted_group() -> str:
+    return group_key(
+        snapshot_id="scripted",
+        start=START,
+        end=END,
+        cost_multiplier=1.0,
+        capital_amount=CAPITAL.amount,
+        capital_currency=CAPITAL.currency,
+    )
+
+
+def seed_peers(registry: InMemoryRegistry, n: int, *, days: int = N_DAYS) -> None:
+    """Two camps: odd peers win early like the candidate, even peers win late.
+
+    In a balanced field the in-sample winner of one camp is the out-of-sample loser, which is what
+    an overfit search looks like.
+    """
+    for i in range(n):
+        wobble = noise(500 + i)
+        sign = 1 if i % 2 else -1
+        registry.append_returns(
+            ReturnSeries(
+                trial_id=uuid.uuid4(),
+                group_key=scripted_group(),
+                timestamps=tuple(START + timedelta(days=d) for d in range(days)),
+                returns=tuple(
+                    sign * (EDGE if d < HALF else -EDGE) + 0.001 * wobble[d] for d in range(days)
+                ),
+            )
+        )
+
+
+def neighbour_noise(params: Mapping[str, Any]) -> list[float]:
+    return noise(seed_of(params))
+
+
+def test_a_trial_stores_its_returns_under_its_own_id(scripted: None) -> None:
+    result, registry = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS)
+    (stored,) = registry.returns_for_group(scripted_group(), limit=10)
+    assert stored.trial_id == result.trial.id
+    assert stored.returns == tuple(WINS_EARLY)
+
+
+def test_cross_trial_pbo_gates_and_rejects_once_the_group_is_large_enough(scripted: None) -> None:
+    registry = InMemoryRegistry()
+    seed_peers(registry, PEER_MIN - 1)
+    result, _ = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    assert result.stage_reached is Stage.TRIAL_ADJUSTED
+    assert result.outcome is Outcome.REJECTED
+    assert "PBO" in result.stages[-1].reason
+    metrics = result.trial.metrics
+    assert metrics["trial_adjusted.pbo_gating"] == 1.0
+    assert metrics["trial_adjusted.pbo"] > PEER_THRESHOLDS.pbo_max
+    assert metrics["trial_adjusted.pbo_group_size"] == PEER_MIN  # candidate counted once
+    # A rejected trial still counts toward the next trial's real N.
+    assert len(registry.returns_for_group(scripted_group(), limit=100)) == PEER_MIN
+
+
+def test_below_the_minimum_group_size_the_trial_is_recorded_not_gated(scripted: None) -> None:
+    registry = InMemoryRegistry()
+    seed_peers(registry, PEER_MIN - 2)
+    result, _ = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    adjusted = next(s for s in result.stages if s.stage is Stage.TRIAL_ADJUSTED)
+    assert adjusted.passed
+    assert result.trial.metrics["trial_adjusted.pbo_gating"] == 0.0
+    assert result.trial.metrics["trial_adjusted.pbo_group_size"] == PEER_MIN - 1
+
+
+def test_the_candidate_is_never_its_own_peer(scripted: None) -> None:
+    registry = InMemoryRegistry()
+    seed_peers(registry, 3)
+    result, _ = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    assert result.trial.metrics["trial_adjusted.pbo_group_size"] == 4
+
+
+def test_a_series_that_does_not_match_the_group_is_not_computed_and_not_fatal(
+    scripted: None,
+) -> None:
+    registry = InMemoryRegistry()
+    seed_peers(registry, PEER_MIN - 1, days=N_DAYS - 1)  # calendar differs from the candidate's
+    result, _ = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    adjusted = next(s for s in result.stages if s.stage is Stage.TRIAL_ADJUSTED)
+    assert adjusted.passed
+    assert "refused" in adjusted.reason
+    assert result.trial.metrics["trial_adjusted.pbo_computed"] == 0.0
+    assert result.trial.metrics["trial_adjusted.pbo_gating"] == 0.0
+    assert registry.count() == 1  # the trial still logged
+    assert all(
+        s.trial_id != result.trial.id
+        for s in registry.returns_for_group(scripted_group(), limit=99)
+    )
+
+
+def test_trials_that_never_reach_stage_three_store_no_series(scripted: None) -> None:
+    harsh_walk_forward = Thresholds(**{**PEER_THRESHOLDS.model_dump(), "wf_min_oos_sharpe": 1000.0})
+    result, registry = run_scripted(WINS_EARLY, neighbour_noise, harsh_walk_forward)
+    assert result.stage_reached is Stage.WALK_FORWARD
+    assert registry.returns_for_group(scripted_group(), limit=10) == []
+
+
+def test_groups_do_not_mix_across_windows(scripted: None) -> None:
+    registry = InMemoryRegistry()
+    seed_peers(registry, PEER_MIN - 1)
+    other_end = END + timedelta(days=1)
+    result = _run_pipeline(
+        strategy=Scripted(WINS_EARLY),
+        build=lambda p: Scripted(WINS_EARLY if dict(p) == PARAMS else noise(seed_of(p))),
+        params=PARAMS,
+        provider=make_provider(),
+        symbols=SYMBOLS,
+        start=START,
+        end=other_end,
+        capital=CAPITAL,
+        registry=registry,
+        seed=0,
+        thresholds=PEER_THRESHOLDS,
+    )
+    assert result.trial.metrics["trial_adjusted.pbo_group_size"] == 1

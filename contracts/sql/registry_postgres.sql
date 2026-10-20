@@ -36,6 +36,17 @@ CREATE TABLE trials (
 CREATE INDEX idx_trials_strategy_id ON trials (strategy_id);
 CREATE INDEX idx_trials_created_at ON trials (created_at);
 
+-- One row per trial that produced a return series: zlib of little-endian int64 deltas of epoch
+-- microseconds followed by float32 returns. Written once, next to (not inside) the trial row.
+CREATE TABLE trial_returns (
+  trial_id UUID PRIMARY KEY,
+  group_key TEXT NOT NULL,
+  n INTEGER NOT NULL CHECK (n > 0),
+  payload BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_trial_returns_group ON trial_returns (group_key, created_at);
+
 CREATE TABLE runs (
   event_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   run_id UUID NOT NULL,
@@ -75,4 +86,7 @@ CREATE TRIGGER commands_append_only
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
 CREATE TRIGGER command_status_history_append_only
   BEFORE UPDATE OR DELETE OR TRUNCATE ON command_status_history
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
+CREATE TRIGGER trial_returns_append_only
+  BEFORE UPDATE OR DELETE OR TRUNCATE ON trial_returns
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();

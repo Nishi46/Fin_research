@@ -18,12 +18,20 @@ Notes the owner should know:
   If the strategy raises `LookaheadError` during it, that is a LOOKAHEAD rejection.
 * Regimes are derived at the floors stage from the benchmark's bars in the provider up to `end`
   (`harness.data.regimes.derive_regimes`); no usable benchmark bars fails FLOORS, never skips it.
-* PBO is computed at stage 3 by CSCV over the candidate plus its derived neighbours (the same
-  configurations stability judges) and RECORDED, but it does not gate: over near-identical
-  parameter neighbours it measures which neighbour wins, not overfitting (owner decision).
-  Metrics: `trial_adjusted.pbo`, `.pbo_computed`, `.pbo_gating = 0.0`. If PBO cannot be computed
-  the stage still decides on DSR alone. Each configuration is backtested exactly once, after
-  `build(params)` is shown to reproduce the submitted strategy, and stability reuses the results.
+* PBO is computed at stage 3 by CSCV across TRIALS: the candidate's net daily returns are stored
+  in the registry under a group key (same data snapshot, window, cost multiplier and capital) and
+  compared with up to `pbo_max_peers` earlier trials of that group. Once the group has
+  `pbo_min_trials` trials it gates (`harness.validation.peers`); below that it is recorded as not
+  gating. Every trial that reaches stage 3 stores a series, including ones rejected later, so the
+  field is the real N. A trial rejected before stage 3 stores none. A series whose timestamps
+  differ from the group's is refused: PBO is then not computed and the reason is in the stage
+  text. Re-submitted identical code is a new trial and counts as an extra peer (owner decision).
+  Metrics: `trial_adjusted.pbo`, `.pbo_computed`, `.pbo_gating`, `.pbo_group_size`.
+* The old PBO over the candidate's derived neighbours is kept as information only, because
+  near-identical neighbours measure which neighbour wins, not overfitting:
+  `trial_adjusted.pbo_neighbours` and `.pbo_neighbours_computed`. Each configuration is
+  backtested exactly once, after `build(params)` is shown to reproduce the submitted strategy,
+  and stability reuses the results.
   A missing `build`, a non-reproducing `build` and too few configurations fail STABILITY; an
   exception while building or running a neighbour is logged as ERROR at STABILITY.
 * `sharpe_per_period` is always recorded. When no return series exists (the base run failed) it
@@ -51,6 +59,8 @@ from contracts import (
     LookaheadError,
     Outcome,
     Registry,
+    ReturnSeries,
+    ReturnSeriesMismatchError,
     Stage,
     Strategy,
     Trial,
@@ -68,6 +78,7 @@ from harness.validation.dsr import (
 )
 from harness.validation.floors import floors_stage
 from harness.validation.lookahead import check_lookahead
+from harness.validation.peers import group_key, peer_matrix
 from harness.validation.stability import MIN_POINTS, neighbour_points, stability_stage
 from harness.validation.walk_forward import walk_forward_stage
 
@@ -233,6 +244,7 @@ def _run_pipeline(
     thresholds: Thresholds,
 ) -> PipelineResult:
     code_version = detect_code_version()
+    trial_id = uuid.uuid4()  # needed before the trial row exists: the return series is filed by it
     stages: list[StageResult] = []
     metrics: dict[str, float] = {}
     current = Stage.LOOKAHEAD
@@ -296,11 +308,16 @@ def _run_pipeline(
             # failure is kept and surfaces at the stability stage, where it belongs.
             runs = _ConfigurationRuns(strategy, build, params, base, backtest, thresholds)
             runs.prepare()
+            peers, pbo_note = _store_and_load_peers(
+                registry, trial_id, base, start, end, capital, thresholds
+            )
             if not record(
                 trial_adjusted_stage(
                     base,
                     registry,
-                    trial_returns=runs.matrix(),
+                    peer_returns=peers,
+                    neighbour_returns=runs.matrix(),
+                    pbo_note=pbo_note,
                     n_trials=registry.count() + 1,
                     thresholds=thresholds,
                 )
@@ -334,6 +351,7 @@ def _run_pipeline(
         stages.append(_fail(current, f"error in {current.value}: {type(err).__name__}: {err}"))
 
     trial = _make_trial(
+        trial_id=trial_id,
         strategy=strategy,
         params=params,
         capital=capital,
@@ -345,6 +363,44 @@ def _run_pipeline(
     )
     registry.append(trial)
     return PipelineResult(stages=tuple(stages), stage_reached=current, outcome=outcome, trial=trial)
+
+
+def _store_and_load_peers(
+    registry: Registry,
+    trial_id: uuid.UUID,
+    base: BacktestResult,
+    start: datetime,
+    end: datetime,
+    capital: CapitalConfig,
+    thresholds: Thresholds,
+) -> tuple[NDArray[np.float64] | None, str | None]:
+    """File the candidate's returns under its group, then build the matrix PBO runs on.
+
+    Returns (matrix, None), or (None, reason) when no matrix exists. Only a timestamp mismatch is
+    absorbed (spec edge 2: the trial still logs with PBO not computed); any other registry
+    failure propagates and ends the run as ERROR rather than quietly skipping the gate.
+    """
+    if not base.daily_returns:
+        return None, "no daily returns to compare"
+    series = ReturnSeries(
+        trial_id=trial_id,
+        group_key=group_key(
+            snapshot_id=base.snapshot_id,
+            start=start,
+            end=end,
+            cost_multiplier=base.cost_multiplier,
+            capital_amount=capital.amount,
+            capital_currency=capital.currency,
+        ),
+        timestamps=base.timestamps,
+        returns=base.daily_returns,
+    )
+    try:
+        registry.append_returns(series)
+    except ReturnSeriesMismatchError:
+        logger.warning("return series refused: timestamps differ from the group's")
+        return None, "return series refused: its timestamps differ from the group's"
+    return peer_matrix(registry, series, max_peers=thresholds.pbo_max_peers), None
 
 
 REPRODUCTION_TOLERANCE = 1e-12
@@ -456,6 +512,7 @@ def _trial_metrics(metrics: dict[str, float], base: BacktestResult | None) -> di
 
 def _make_trial(
     *,
+    trial_id: uuid.UUID,
     strategy: Strategy,
     params: Mapping[str, int | float],
     capital: CapitalConfig,
@@ -466,7 +523,7 @@ def _make_trial(
     metrics: Mapping[str, float],
 ) -> Trial:
     return Trial(
-        id=uuid.uuid4(),
+        id=trial_id,
         created_at=datetime.now(UTC),
         strategy_id=_strategy_id(strategy),
         code_hash=_code_hash(strategy),

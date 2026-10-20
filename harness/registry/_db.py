@@ -11,13 +11,12 @@ DDL_PATH = Path(contracts.__file__).resolve().parent / "sql" / "registry_sqlite.
 
 
 def connect(database: str) -> sqlite3.Connection:
-    """Open `database` (":memory:" for tests) with the frozen schema applied if it is new."""
+    """Open `database` (":memory:" for tests) and apply the frozen schema.
+
+    The DDL is idempotent, so applying it to an existing file only adds what is missing.
+    """
     conn = sqlite3.connect(database, isolation_level=None)
-    has_schema = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trials'"
-    ).fetchone()
-    if has_schema is None:
-        conn.executescript(DDL_PATH.read_text(encoding="utf-8"))
+    conn.executescript(DDL_PATH.read_text(encoding="utf-8"))
     return conn
 
 

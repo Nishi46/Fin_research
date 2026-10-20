@@ -9,7 +9,15 @@ from contracts.data import (
 )
 from contracts.dataview import DataView, LookaheadError
 from contracts.intent import Intent
-from contracts.registry import DuplicateTrialError, Outcome, Registry, Stage, Trial
+from contracts.registry import (
+    DuplicateTrialError,
+    Outcome,
+    Registry,
+    ReturnSeries,
+    ReturnSeriesMismatchError,
+    Stage,
+    Trial,
+)
 from contracts.runtime import (
     Command,
     CommandInbox,
@@ -45,6 +53,8 @@ __all__ = [
     "Order",
     "Outcome",
     "Registry",
+    "ReturnSeries",
+    "ReturnSeriesMismatchError",
     "RunEvent",
     "RunLog",
     "RunStatus",

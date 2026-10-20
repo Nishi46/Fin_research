@@ -57,6 +57,10 @@ def test_regime_derivation_settings() -> None:
         ("dsr_min_probability", 1.5),
         ("dsr_min_probability", 0.0),
         ("pbo_max", 1.5),
+        ("pbo_min_trials", 1),
+        ("pbo_max_peers", 0),
+        ("pbo_n_blocks", 0),
+        ("pbo_n_blocks", 15),
         ("cost_multiplier", 1.0),
         ("stability_tolerance", 0.0),
         ("min_trades", 0),
@@ -156,3 +160,16 @@ def test_regime_lookup_is_half_open() -> None:
     )
     assert regime.contains(regime.start)
     assert not regime.contains(regime.end)
+
+
+def test_cross_trial_pbo_settings_are_frozen_here() -> None:
+    t = DEFAULT_THRESHOLDS
+    assert t.pbo_min_trials == 30
+    assert t.pbo_max_peers == 200
+    assert t.pbo_n_blocks == 16
+
+
+def test_pbo_gate_must_be_reachable() -> None:
+    # The candidate plus its peers is the group; a peer cap below min_trials - 1 never gates.
+    with pytest.raises(ValidationError, match="reachable"):
+        Thresholds(pbo_min_trials=30, pbo_max_peers=10)

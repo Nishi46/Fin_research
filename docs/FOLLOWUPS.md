@@ -2,38 +2,38 @@
 
 Decisions the owner has made that are not built yet. Each has a trigger, so none is forgotten.
 
-## True PBO, before the proposer agent (build step 5)
+## True PBO, before the proposer agent (build step 5): BUILT 2026-10-20, awaiting owner review
 
-Spec written 2026-10-19: `.planning/specs/true-pbo.md`. BLOCKED on the owner: it changes the
-Registry contract, its contract suite and the fakes (protected paths), so it needs the owner's
-approval and an unlock (`LAB_UNLOCK_PROTECTED=1`). Not started beyond the spec.
+Spec `.planning/specs/true-pbo.md`, plan `.planning/plans/true-pbo.md`. Built in a session started
+with `LAB_UNLOCK_PROTECTED=1`; nothing is committed (the owner commits). The precondition for
+step 5 is met once the owner has reviewed and committed it.
+
+What changed: `Registry` gained `append_returns` / `returns_for_group` and `ReturnSeries`
+(contracts, fake, contract suite); a `trial_returns` table with append-only triggers in both DDL
+files (the SQLite DDL is now idempotent so existing database files gain the table); thresholds
+`pbo_min_trials = 30`, `pbo_max_peers = 200`, `pbo_n_blocks = 16`; `harness/validation/peers.py`;
+stage 3 gates on cross-trial PBO once the group has 30 trials. The old neighbour PBO is kept as the
+informational metric `pbo_neighbours`.
+
+Measured and decided on the way (worth the owner's attention):
+- **Only trials that reach stage 3 file a series.** About 40% of pure-noise submissions clear
+  walk-forward, so a 30-trial group takes roughly 75 submissions. This is deliberate: CSCV ranks the
+  winner relative to the field, so filing trials that fail walk-forward would let an agent dilute
+  the field with junk and drive PBO toward zero. Trials rejected at lookahead are excluded for the
+  same reason (a leaky series is unrealistically good). DSR still deflates by every logged trial.
+- **PBO alone is a weak gate on pure noise.** The best of N noise strategies scattered between 0.27
+  and 0.69 (mean about 0.57), so PBO rejects a given draw only a little over half the time. DSR is
+  what reliably rejects best-of-N noise. A planted edge among 25 to 49 noise peers gave PBO 0.000
+  on all six seeds, so the gate did not reject a genuine edge in the tests.
+- **R7 runtime:** 16 blocks at 201 columns takes 0.23s; not a constraint. Storage is 3.8 KB per
+  1,000 days after delta-encoding the timestamps (the spec estimated 8 KB).
+- The group key omits the symbol list, as specified; adding it is a one-line change.
+- Re-submitted identical code counts as extra peers (owner decision, no dedupe).
+
+Not done: the optional `verify` command that recomputes a group's PBO from stored series.
 
 Also written 2026-10-19: `docs/PROPOSER_ISOLATION.md` (design and runbook; not set up, needs the
 owner's machine and sudo) and `docs/PHASE1_HARNESS_REVIEW.md` (reading guide for the lock).
-
-**Precondition for step 5: do not build the proposer agent until this is done.** The Deflated
-Sharpe Ratio already deflates for the number of trials, but PBO asks a different question, whether
-the in-sample winner of many genuinely different candidates holds up out of sample, and it matters
-most once an agent is proposing many candidates.
-
-Why it is not in Phase 1: PBO needs the daily returns of many different trials. The pipeline now
-computes PBO over a candidate and its parameter neighbours, which are near-identical strategies,
-and that measures which neighbour wins, not overfitting (it rejected the planted-edge positive
-control at PBO 0.785). It is recorded in every trial's metrics but does not gate.
-
-What it needs:
-- A registry table for per-trial return series (append-only, same triggers as the rest), a new
-  `Registry` method to write and read them, and the SQLite and Postgres DDL. This changes the
-  frozen contracts and needs the owner's approval. Size: about 8 KB per 1,000 days, roughly 0.8 GB
-  per 100,000 trials, so consider float32 or compression.
-- A grouping key, so the trials compared share one data snapshot and window and have aligned
-  timestamps.
-- Pipeline wiring: CSCV over the batch plus the candidate, gated on `pbo_max`. The cost grows with
-  the batch size, so measure before choosing the partition count.
-- Adversary tests: best-of-N noise should show high PBO, and a genuine edge among noise should show
-  low PBO.
-
-`harness/` is locked after the Phase 1 gate, so this is an owner-unlocked change.
 
 ## Calibrate the data reconciliation tolerances (done 2026-10-18, recalibrate when universe widens)
 
