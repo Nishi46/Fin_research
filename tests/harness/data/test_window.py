@@ -264,3 +264,10 @@ def test_inner_not_mutated_and_usable_as_data_provider() -> None:
     w: DataProvider = ResearchWindow(inner, _CUT)
     w.bars(["AAA"], _LAST_CLOSE)
     assert inner.bars(["AAA"], _LAST_CLOSE) == before
+
+
+def test_research_end_is_exposed_read_only() -> None:
+    w = ResearchWindow(_inner(), _CUT)
+    assert w.research_end == _CUT
+    with pytest.raises(AttributeError):
+        w.research_end = date(2000, 1, 1)  # type: ignore[misc]

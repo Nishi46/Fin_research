@@ -25,6 +25,7 @@ PAGE_LIMIT = "10000"  # capital-literal-ok: API page size, not an account size
 # The corporate-actions endpoint rejects limits above 1000 with HTTP 400 (bars allow 10000).
 ACTIONS_PAGE_LIMIT = "1000"  # capital-literal-ok: API page size, not an account size
 BARS_PATH = "/v2/stocks/bars"
+MAX_PAGES = 10_000  # capital-literal-ok: runaway-paging guard, not an account size
 
 
 class HttpClient(Protocol):
@@ -81,7 +82,10 @@ class AlpacaDataClient:
     def _pages(self, url: str, params: dict[str, str]) -> list[dict[str, Any]]:
         pages: list[dict[str, Any]] = []
         token: str | None = None
+        seen: set[str] = set()
         while True:
+            if len(pages) >= MAX_PAGES:
+                raise RuntimeError(f"paging exceeded MAX_PAGES={MAX_PAGES} for {url}")
             query = dict(params)
             if token:
                 query["page_token"] = token
@@ -91,6 +95,9 @@ class AlpacaDataClient:
             token = page.get("next_page_token")
             if not token:
                 return pages
+            if token in seen:
+                raise RuntimeError(f"repeated next_page_token {token!r} from {url}")
+            seen.add(token)
 
     def fetch_bars(self, symbols: Sequence[str], start: datetime, end: datetime) -> list[Bar]:
         # Never ask for today: its daily bar is still forming and would be stamped as a full

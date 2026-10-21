@@ -40,7 +40,7 @@ class Thresholds(BaseModel):
     # earlier trials of the same group. It gates only once the group has pbo_min_trials trials,
     # because below that the estimate is too erratic (pure noise gave 0.99, 0.73 and 0.51 at 21,
     # 101 and 201 columns). 16 blocks at 201 columns takes about 0.23s.
-    pbo_min_trials: int = Field(default=30, ge=2)
+    pbo_min_trials: int = Field(default=30, ge=10)
     pbo_max_peers: int = Field(default=200, ge=1)
     pbo_n_blocks: int = Field(default=16, ge=2)
     # cost_sensitivity: re-run at this multiple of costs; profit factor must stay above the floor.

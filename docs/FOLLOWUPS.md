@@ -2,6 +2,17 @@
 
 Decisions the owner has made that are not built yet. Each has a trigger, so none is forgotten.
 
+## Independent review of the harness (2026-10-20)
+
+Four reviewers, results and fixes in `docs/PHASE1_HARNESS_REVIEW.md` ("Independent review results").
+Decided 2026-10-20: PBO is a field-level diagnostic (code message and docs say so); only
+walk-forward survivors contribute a return series (spec R4a, R4b). Also decided and built the same
+day: a cost-model fingerprint in the PBO group key; `run_pipeline` requires a `ResearchWindow`-wrapped
+provider; the strategy interface (`ParametrizedStrategy`, spec `.planning/specs/strategy-interface.md`)
+with a conformance suite, so build step 2 is complete. The one open item from the review is that
+strategy code runs inside the grading process (see `docs/PROPOSER_ISOLATION.md`); it is the main
+design item for build step 5 and does not block the Phase 1 lock.
+
 ## True PBO, before the proposer agent (build step 5): BUILT 2026-10-20, awaiting owner review
 
 Spec `.planning/specs/true-pbo.md`, plan `.planning/plans/true-pbo.md`. Built in a session started
@@ -54,8 +65,11 @@ caps `limit` at 1000 (bars allow 10000). Fixed with `ACTIONS_PAGE_LIMIT` in
 
 ## Holdout
 
-Decided by the owner on 2026-10-18:
-- **Length and period:** the most recent 2 years of data (`holdout_years = 2`, about 504 daily
+Decided by the owner (the t-statistic bar was required before this section was rewritten; recorded
+again here because a later audit could not find it outside the thresholds file):
+- **Bar:** the gate requires a t-statistic of the holdout's net daily returns of at least 2
+  (`holdout_min_t_stat = 2.0`), not a fixed Sharpe, because a t-statistic scales with holdout length.
+- **Length and period (2026-10-18):** the most recent 2 years of data (`holdout_years = 2`, about 504 daily
   returns; t >= 2 then needs an annualized Sharpe of about 1.4). Research and walk-forward use
   everything before it.
 - **Lifetime cap:** 20 queries in total across all strategies (`holdout_max_queries = 20`). Built:

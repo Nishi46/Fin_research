@@ -58,6 +58,7 @@ def test_regime_derivation_settings() -> None:
         ("dsr_min_probability", 0.0),
         ("pbo_max", 1.5),
         ("pbo_min_trials", 1),
+        ("pbo_min_trials", 9),
         ("pbo_max_peers", 0),
         ("pbo_n_blocks", 0),
         ("pbo_n_blocks", 15),
@@ -173,3 +174,7 @@ def test_pbo_gate_must_be_reachable() -> None:
     # The candidate plus its peers is the group; a peer cap below min_trials - 1 never gates.
     with pytest.raises(ValidationError, match="reachable"):
         Thresholds(pbo_min_trials=30, pbo_max_peers=10)
+
+
+def test_pbo_min_trials_lower_bound_is_ten() -> None:
+    assert Thresholds(pbo_min_trials=10, pbo_max_peers=200).pbo_min_trials == 10

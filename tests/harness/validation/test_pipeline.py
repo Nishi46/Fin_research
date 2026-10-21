@@ -14,14 +14,17 @@ import pytest
 from contracts import CapitalConfig, Intent, Outcome, ReturnSeries, Stage
 from contracts.data import Bar
 from contracts.dataview import DataView
+from contracts.strategy import ParametrizedStrategy
 from fakes.data import InMemoryDataProvider
 from fakes.registry import InMemoryRegistry
 from harness.api import BacktestResult, TradeRecord
+from harness.costs.model import RealCostModel
+from harness.data.window import ResearchWindow
 from harness.engine.runner import run_backtest
 from harness.thresholds import Thresholds
 from harness.validation import pipeline
 from harness.validation.floors import floors_stage
-from harness.validation.peers import group_key
+from harness.validation.peers import cost_model_fingerprint, group_key
 from harness.validation.pipeline import (
     INFINITY_CAP,
     PipelineResult,
@@ -29,7 +32,7 @@ from harness.validation.pipeline import (
     json_safe_metrics,
     run_pipeline,
 )
-from tests.helpers import make_trial
+from tests.helpers import make_trial, research_provider
 
 START = datetime(2020, 1, 1, 21, tzinfo=UTC)
 END = START + timedelta(days=149)
@@ -155,7 +158,7 @@ def run(
         strategy=strategy if strategy is not None else Cycle(3, 2),
         build=builder,
         params=PARAMS,
-        provider=provider if provider is not None else make_provider(),
+        provider=research_provider(provider if provider is not None else make_provider(), end=END),
         symbols=SYMBOLS,
         start=START,
         end=END,
@@ -262,7 +265,7 @@ def test_rejected_at_stability_when_there_are_too_few_configurations() -> None:
         strategy=Cycle(3, 2),
         build=lambda _p: Cycle(3, 2),
         params={},
-        provider=make_provider(),
+        provider=research_provider(make_provider(), end=END),
         symbols=SYMBOLS,
         start=START,
         end=END,
@@ -283,7 +286,7 @@ def test_pbo_that_cannot_be_computed_does_not_fail_trial_adjusted() -> None:
         strategy=Cycle(3, 2),
         build=build,
         params=PARAMS,
-        provider=make_provider(),
+        provider=research_provider(make_provider(), end=END),
         symbols=SYMBOLS,
         start=START,
         end=START + timedelta(days=19),  # 20 rows: too few for the CSCV partitioning
@@ -448,7 +451,7 @@ def test_public_entry_point_always_uses_the_default_thresholds() -> None:
         strategy=Cycle(3, 2),
         build=build,
         params=PARAMS,
-        provider=make_provider(),
+        provider=research_provider(make_provider(), end=END),
         symbols=SYMBOLS,
         start=START,
         end=END,
@@ -584,7 +587,7 @@ def run_scripted(
         strategy=Scripted(candidate, event_holds),
         build=scripted_build,
         params=PARAMS,
-        provider=make_provider(),
+        provider=research_provider(make_provider(), end=END),
         symbols=SYMBOLS,
         start=START,
         end=END,
@@ -739,7 +742,7 @@ def run_scripted_with_spy(spy: list[float]) -> tuple[PipelineResult, InMemoryReg
         strategy=Scripted(candidate),
         build=lambda p: Scripted(candidate if dict(p) == PARAMS else noise(seed_of(p), 0.003)),
         params=PARAMS,
-        provider=make_provider(spy_closes=spy),
+        provider=research_provider(make_provider(spy_closes=spy), end=END),
         symbols=SYMBOLS,
         start=START,
         end=END,
@@ -788,7 +791,7 @@ def test_bars_after_end_from_a_leaky_provider_are_ignored() -> None:
 
 # --- cross-trial PBO: peers are earlier trials of the same group ---------------------------------
 
-PEER_MIN = 6
+PEER_MIN = 10
 PEER_THRESHOLDS = Thresholds(
     **{**LENIENT.model_dump(), "pbo_min_trials": PEER_MIN, "pbo_n_blocks": 8, "pbo_max": 0.5}
 )
@@ -805,6 +808,7 @@ def scripted_group() -> str:
         cost_multiplier=1.0,
         capital_amount=CAPITAL.amount,
         capital_currency=CAPITAL.currency,
+        cost_fingerprint=cost_model_fingerprint(None),
     )
 
 
@@ -872,22 +876,37 @@ def test_the_candidate_is_never_its_own_peer(scripted: None) -> None:
     assert result.trial.metrics["trial_adjusted.pbo_group_size"] == 4
 
 
-def test_a_series_that_does_not_match_the_group_is_not_computed_and_not_fatal(
-    scripted: None,
-) -> None:
+def test_a_mismatched_series_in_an_established_group_fails_trial_adjusted(scripted: None) -> None:
     registry = InMemoryRegistry()
     seed_peers(registry, PEER_MIN - 1, days=N_DAYS - 1)  # calendar differs from the candidate's
     result, _ = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
     adjusted = next(s for s in result.stages if s.stage is Stage.TRIAL_ADJUSTED)
-    assert adjusted.passed
-    assert "refused" in adjusted.reason
+    assert not adjusted.passed
+    assert "does not match the group's calendar" in adjusted.reason
+    assert result.stage_reached is Stage.TRIAL_ADJUSTED
+    assert result.outcome is Outcome.REJECTED
+    assert result.trial.metrics["trial_adjusted.pbo_refused"] == 1.0
     assert result.trial.metrics["trial_adjusted.pbo_computed"] == 0.0
-    assert result.trial.metrics["trial_adjusted.pbo_gating"] == 0.0
     assert registry.count() == 1  # the trial still logged
     assert all(
         s.trial_id != result.trial.id
         for s in registry.returns_for_group(scripted_group(), limit=99)
     )
+
+
+def test_a_mismatched_series_in_a_small_group_is_recorded_but_does_not_gate(
+    scripted: None,
+) -> None:
+    registry = InMemoryRegistry()
+    seed_peers(registry, PEER_MIN - 4, days=N_DAYS - 1)
+    result, _ = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    adjusted = next(s for s in result.stages if s.stage is Stage.TRIAL_ADJUSTED)
+    assert adjusted.passed
+    assert "refused" in adjusted.reason
+    assert result.trial.metrics["trial_adjusted.pbo_refused"] == 1.0
+    assert result.trial.metrics["trial_adjusted.pbo_computed"] == 0.0
+    assert result.trial.metrics["trial_adjusted.pbo_gating"] == 0.0
+    assert registry.count() == 1
 
 
 def test_trials_that_never_reach_stage_three_store_no_series(scripted: None) -> None:
@@ -905,7 +924,7 @@ def test_groups_do_not_mix_across_windows(scripted: None) -> None:
         strategy=Scripted(WINS_EARLY),
         build=lambda p: Scripted(WINS_EARLY if dict(p) == PARAMS else noise(seed_of(p))),
         params=PARAMS,
-        provider=make_provider(),
+        provider=research_provider(make_provider(), end=other_end),
         symbols=SYMBOLS,
         start=START,
         end=other_end,
@@ -915,3 +934,281 @@ def test_groups_do_not_mix_across_windows(scripted: None) -> None:
         thresholds=PEER_THRESHOLDS,
     )
     assert result.trial.metrics["trial_adjusted.pbo_group_size"] == 1
+
+
+# --- the trial is logged on every path ------------------------------------------------------------
+
+
+def _assert_no_orphan_series(registry: InMemoryRegistry) -> None:
+    for series in registry.returns_for_group(scripted_group(), limit=1000):
+        assert registry.get(series.trial_id) is not None, "series filed without a trial row"
+
+
+def test_a_failure_while_building_trial_metrics_still_logs_an_error_trial(
+    scripted: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: Any, **kwargs: Any) -> dict[str, float]:
+        raise ValueError("metric 'x' is NaN")
+
+    monkeypatch.setattr(pipeline, "_trial_metrics", boom)
+    result, registry = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS)
+    assert registry.count() == 1
+    stored = registry.get(result.trial.id)
+    assert stored is not None
+    assert stored.outcome is Outcome.ERROR
+    assert stored.metrics["error"] == 1.0
+    assert result.outcome is Outcome.ERROR
+    assert result.trial == stored
+    assert registry.returns_for_group(scripted_group(), limit=10)  # the series was filed...
+    _assert_no_orphan_series(registry)  # ...and has its trial row
+
+
+def test_a_failure_in_sharpe_moments_still_logs_an_error_trial(
+    scripted: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def flaky(returns: Any) -> Any:  # the pipeline's own reference is used only for trial metrics
+        raise ValueError("boom")
+
+    monkeypatch.setattr(pipeline, "sharpe_moments", flaky)
+    result, registry = run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS)
+    assert registry.count() == 1
+    assert result.trial.outcome is Outcome.ERROR
+    _assert_no_orphan_series(registry)
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit])
+def test_a_base_exception_in_a_late_stage_still_logs_then_reraises(
+    scripted: None, monkeypatch: pytest.MonkeyPatch, exc: type[BaseException]
+) -> None:
+    def interrupt(*args: Any, **kwargs: Any) -> Any:
+        raise exc()
+
+    monkeypatch.setattr(pipeline, "cost_sensitivity_stage", interrupt)
+    registry = InMemoryRegistry()
+    with pytest.raises(exc):
+        run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    (trial,) = registry.list()
+    assert trial.outcome is Outcome.ERROR
+    assert trial.stage_reached is Stage.COST_SENSITIVITY
+    assert trial.metrics["error"] == 1.0
+    _assert_no_orphan_series(registry)
+
+
+def test_a_keyboard_interrupt_from_the_strategy_logs_then_reraises() -> None:
+    class Interrupter:
+        strategy_id = "interrupt"
+
+        def generate(self, data: DataView, asof: datetime) -> Intent:
+            raise KeyboardInterrupt
+
+    registry = InMemoryRegistry()
+    with pytest.raises(KeyboardInterrupt):
+        run(strategy=Interrupter(), registry=registry)
+    (trial,) = registry.list()
+    assert trial.outcome is Outcome.ERROR
+
+
+def test_a_failed_trial_append_is_logged_loudly_with_the_orphan_series(
+    scripted: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    class BrokenAppend(InMemoryRegistry):
+        def append(self, trial: Any) -> None:
+            raise OSError("disk full")
+
+    registry = BrokenAppend()
+    with caplog.at_level("CRITICAL"), pytest.raises(OSError, match="disk full"):
+        run_scripted(WINS_EARLY, neighbour_noise, PEER_THRESHOLDS, registry=registry)
+    (orphan,) = registry.returns_for_group(scripted_group(), limit=10)
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "CRITICAL"]
+    assert any(str(orphan.trial_id) in m and "return series" in m for m in messages)
+
+
+# --- optional build / params: taken from a ParametrizedStrategy --------------------------------
+
+
+class ParamCycle(Cycle):
+    """Cycle that satisfies ParametrizedStrategy (strategy_id, params, with_params, lookback)."""
+
+    @property
+    def params(self) -> dict[str, int | float]:
+        return {"hold": self.hold, "flat": self.flat}
+
+    @property
+    def lookback_bars(self) -> int:
+        return 0
+
+    def with_params(self, params: Mapping[str, int | float]) -> "ParamCycle":
+        return ParamCycle(int(params["hold"]), int(params["flat"]))
+
+
+def run_bare(strategy: Any, **explicit: Any) -> tuple[PipelineResult, InMemoryRegistry]:
+    """Call the pipeline with only the strategy (plus whatever `explicit` adds)."""
+    registry = InMemoryRegistry()
+    result = _run_pipeline(
+        strategy=strategy,
+        provider=research_provider(make_provider(), end=END),
+        symbols=SYMBOLS,
+        start=START,
+        end=END,
+        capital=CAPITAL,
+        registry=registry,
+        seed=0,
+        thresholds=LENIENT,
+        **explicit,
+    )
+    return result, registry
+
+
+def test_a_parametrized_strategy_needs_no_build_or_params() -> None:
+    bare, _ = run_bare(ParamCycle(3, 2))
+    explicit, _ = run(strategy=ParamCycle(3, 2))
+    assert isinstance(ParamCycle(3, 2), ParametrizedStrategy)
+    assert bare.stage_reached is explicit.stage_reached is Stage.FLOORS
+    assert bare.outcome is explicit.outcome
+    assert bare.trial.params == PARAMS
+    stability = {k: v for k, v in bare.trial.metrics.items() if k.startswith("stability.")}
+    assert stability
+    assert stability == {
+        k: v for k, v in explicit.trial.metrics.items() if k.startswith("stability.")
+    }
+
+
+def test_a_plain_strategy_without_build_still_fails_stability_and_logs_empty_params() -> None:
+    result, _ = run_bare(Cycle(3, 2))
+    assert result.stage_reached is Stage.STABILITY
+    assert "build" in result.stages[-1].reason
+    assert result.trial.params == {}
+
+
+def test_explicit_build_wins_over_the_strategys_with_params() -> None:
+    def impostor(params: Mapping[str, Any]) -> Cycle:
+        return Cycle(2, 2)
+
+    result, _ = run_bare(ParamCycle(3, 2), build=impostor)
+    assert result.stage_reached is Stage.STABILITY
+    assert "does not reproduce" in result.stages[-1].reason
+
+
+def test_explicit_params_win_over_the_strategys() -> None:
+    explicit = {"hold": 4, "flat": 1}
+    result, _ = run_bare(ParamCycle(3, 2), params=explicit)
+    assert result.trial.params == explicit
+    assert result.stage_reached is Stage.STABILITY  # with_params(explicit) != submitted
+    assert "does not reproduce" in result.stages[-1].reason
+
+
+def test_trials_run_with_different_cost_models_land_in_different_groups() -> None:
+    registry = InMemoryRegistry()
+    snapshot_id = make_provider().snapshot().id
+    models = {"default": None, "pricey": RealCostModel(slippage_bps=25.0)}
+    keys = {}
+    for name, model in models.items():
+        _run_pipeline(
+            strategy=Cycle(3, 2),
+            build=build,
+            params=PARAMS,
+            provider=research_provider(make_provider(), end=END),
+            symbols=SYMBOLS,
+            start=START,
+            end=END,
+            capital=CAPITAL,
+            registry=registry,
+            seed=0,
+            cost_model=model,
+            thresholds=LENIENT,
+        )
+        keys[name] = group_key(
+            snapshot_id=snapshot_id,
+            start=START,
+            end=END,
+            cost_multiplier=1.0,
+            capital_amount=CAPITAL.amount,
+            capital_currency=CAPITAL.currency,
+            cost_fingerprint=cost_model_fingerprint(model),
+        )
+    assert keys["default"] != keys["pricey"]
+    for key in keys.values():
+        assert len(registry.returns_for_group(key, limit=10)) == 1
+    # an explicit default model is the same group as None
+    assert cost_model_fingerprint(RealCostModel()) == cost_model_fingerprint(None)
+
+
+# --- the provider must be research-clamped ------------------------------------------------------
+
+
+def _run_with_provider(provider: Any, end: datetime = END) -> InMemoryRegistry:
+    registry = InMemoryRegistry()
+    _run_pipeline(
+        strategy=Cycle(3, 2),
+        build=build,
+        params=PARAMS,
+        provider=provider,
+        symbols=SYMBOLS,
+        start=START,
+        end=end,
+        capital=CAPITAL,
+        registry=registry,
+        seed=0,
+        thresholds=LENIENT,
+    )
+    return registry
+
+
+def test_an_unwrapped_provider_is_refused_before_any_trial_is_logged() -> None:
+    registry = InMemoryRegistry()
+    with pytest.raises(TypeError, match="ResearchWindow"):
+        _run_with_provider(make_provider())
+    with pytest.raises(TypeError, match="ResearchWindow"):
+        run_pipeline(
+            strategy=Cycle(3, 2),
+            provider=make_provider(),
+            symbols=SYMBOLS,
+            start=START,
+            end=END,
+            capital=CAPITAL,
+            registry=registry,
+            seed=0,
+        )
+    assert registry.count() == 0
+
+
+def test_an_end_beyond_the_research_window_is_refused_before_any_trial_is_logged() -> None:
+    registry = InMemoryRegistry()
+    early = ResearchWindow(make_provider(), (START + timedelta(days=60)).date())
+    with pytest.raises(ValueError, match="research_end"):
+        _run_pipeline(
+            strategy=Cycle(3, 2),
+            build=build,
+            params=PARAMS,
+            provider=early,
+            symbols=SYMBOLS,
+            start=START,
+            end=END,
+            capital=CAPITAL,
+            registry=registry,
+            seed=0,
+            thresholds=LENIENT,
+        )
+    assert registry.count() == 0
+
+
+def test_an_end_exactly_at_the_window_close_is_accepted() -> None:
+    from harness.data.calendar import session_close_utc
+
+    last = (START + timedelta(days=100)).date()
+    registry = InMemoryRegistry()
+    result = _run_pipeline(
+        strategy=Cycle(3, 2),
+        build=build,
+        params=PARAMS,
+        provider=ResearchWindow(make_provider(), last),
+        symbols=SYMBOLS,
+        start=START,
+        end=session_close_utc(last),
+        capital=CAPITAL,
+        registry=registry,
+        seed=0,
+        thresholds=LENIENT,
+    )
+    assert registry.count() == 1
+    assert result.outcome is not Outcome.ERROR

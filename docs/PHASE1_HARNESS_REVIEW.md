@@ -66,6 +66,88 @@ counts as an extra peer by owner decision.
   2016) are caught only by the Yahoo reconciliation.
 - **Data quirk.** A few SIP sessions carry a tiny-volume bar for many symbols and no check flags it.
 
+## Independent review results (2026-10-20)
+
+Four read-only reviewers (holdout gate and store, cross-trial PBO, data layer and carve script,
+invariants and thresholds) examined the diff. They found no critical defect and nothing that touches
+the carved holdout data. Every finding below is either fixed with a test that failed first (or was
+shown to bite by mutation), waiting for an owner decision, or deliberately deferred.
+
+### Fixed (test first)
+
+| Area | Finding | Fix |
+|---|---|---|
+| Pipeline | The trial append was not in a `finally` despite the docstring, so a failure while building a trial could skip logging it and leave an orphan return series that still counted as a PBO peer | Trial is built and appended in a `finally` with a minimal ERROR-trial fallback; KeyboardInterrupt and SystemExit are logged then re-raised; a failed append logs CRITICAL |
+| Gate | `min_t_stat` and `max_queries` could be set by the caller (0.0 passes constant-zero returns; a huge cap) | Constructor requires `min_t_stat` finite and at least 2.0, `max_queries` an int in [1, 20] |
+| Gate | `"passed": "false"` in the ledger replayed as True | Strict boolean; anything else raises a ledger error |
+| Gate | Ledger: torn line fused two entries, blank lines counted as queries, no locking | Newline repair, blank lines ignored, malformed lines raise naming the line, `flock` around lookup, run and append, fsync |
+| Gate | Manifest not checked for sanity; symlinks followed; no re-check after the run | Date-coherence and contents-versus-manifest checks, symlinks rejected, re-verify after `run` |
+| Gate | NY versus UTC session filter untested | Boundary tests at 01:00, 03:00, 04:00, 18:00 and 21:00 UTC; the mutation to `ts.date()` is caught |
+| PBO | A refused return series silently switched the PBO gate off | Always records `pbo_refused`; fails the stage once the group is established |
+| PBO | Group key sensitive to UTC offset and Decimal formatting; candidate float64 vs peers float32 | Keys normalised; candidate round-tripped through float32 |
+| PBO | Every sqlite IntegrityError became DuplicateTrialError; `pbo_min_trials` allowed 2 | Only duplicate cases map; lower bound now 10 (default stays 30) |
+| Reconcile | One symbol with zero Yahoo coverage could pass on pooled overlap | Fails when any symbol has no overlap at all (no threshold changed) |
+| Alpaca | Paging could loop forever; reverse-split direction untested | Guard on repeated token and page cap; direction pinned by tests (code was already right) |
+
+### Needs an owner decision
+
+**Decided 2026-10-20:** (1) PBO is documented and worded as a field-level diagnostic; (2) the code
+keeps storing series only for walk-forward survivors and spec R4 is amended (R4a, R4b in
+`.planning/specs/true-pbo.md`); (3) the PBO group key now includes a cost-model fingerprint
+(`cost_model_fingerprint` in `harness/validation/peers.py`; `None` equals the explicit default model;
+an unreadable model fails closed); (4) `run_pipeline` refuses a provider that is not a
+`ResearchWindow` (TypeError) and an `end` beyond it (ValueError), before any trial is logged;
+(5) the strategy interface is defined: `ParametrizedStrategy` in `contracts/strategy.py` (`params`,
+`with_params`, `lookback_bars`, stateless and deterministic), `BaselineReversal` conforms, a
+conformance suite lives in `tests/contract_suite/test_strategy_contract.py`, and `run_pipeline` can be
+called without `build`/`params` (spec `.planning/specs/strategy-interface.md`). Only item 6 (where
+strategy code runs) is still open, and it is build step 5 design. The original text of 1 to 6 follows.
+
+1. **PBO is field-level, not per-candidate (HIGH).** CSCV asks whether the best of the whole field holds
+   up out of sample. If the group contains one genuinely strong peer, a junk candidate also sees a
+   near-zero PBO and passes that gate (reviewer's experiment: a losing candidate scored 0.0003 beside one
+   strong peer). On pure noise the gate is a coin flip. Options: (a) gate on a candidate-specific
+   quantity, such as the candidate's own in-sample-to-out-of-sample rank logits; (b) keep it and state
+   in the spec that PBO is a field-level overfitting diagnostic, with DSR and the other stages doing the
+   per-candidate rejection. This does not make the lab less safe (the gate only adds rejections) but
+   "PBO rejected this candidate" must not be read as "this candidate overfits".
+2. **Which trials contribute a series.** The spec said every trial, including rejected ones. The build
+   stores a series only for trials that pass lookahead and walk-forward. Keeping that is arguably better
+   (a lookahead cheater's huge returns would dominate the field and push PBO toward zero), but it means
+   about 100 submissions are needed to reach 30 peers, and the real N is only in DSR. Recommend: keep the
+   code, amend spec R4.
+3. **Group key and cost model.** The key includes `cost_multiplier` but not the cost model itself, so
+   two trials run with different `CostModel` objects share a group. Add a cost-model fingerprint?
+4. **Research-window assertion.** `run_pipeline` trusts the caller to pass a provider already clamped to
+   the research window; `check_lookahead` asks for `FAR_FUTURE`. Require a verified `ResearchWindow`?
+5. **Strategy interface stub (build step 2) is incomplete.** The pipeline needs a `build(params)`
+   callable and a params mapping for neighbour and stability checks, but `contracts/strategy.py` defines
+   neither, and `BaselineReversal` has no `build`. Also undefined: warm-up lookback, declared universe,
+   statefulness (a stateful strategy makes the lookahead comparison unreliable), exceptions, timeouts.
+6. **Where strategy code runs.** See `docs/PROPOSER_ISOLATION.md`: grading executes strategy code
+   inside the process that holds the holdout path. The sandboxed run loop is the main open item for
+   build step 5.
+
+### Deferred, with reasons
+
+- **Walk-forward is a stability slice** (purge 0, nothing fitted per fold, first block unscored). Known
+  and documented in the stage; real purge and embargo matter once something is fitted.
+- **Lookahead check times** are a deterministic grid of 20; a leak confined to a sparse set of dates could
+  slip between them. Candidate fix: randomised, seed-recorded times.
+- **Literals outside `Thresholds`:** `BacktestConfig` defaults (`adv_window` 20, `rebalance_band` 0.02),
+  the adjustment jump constants, `MIN_STALE_RUN`, `MIN_POINTS`, the lookahead warm-up fraction. Not
+  owner-recorded. Worth moving into the frozen object before the lock if you want them frozen formally.
+- **Tiny-volume SIP bars** are not flagged by any quality check (needs a threshold you set, such as 1% of
+  the trailing median).
+- **Carve-script findings** (missing-symbol check, atomicity, error output): moot, because a second carve
+  is refused by design. The data it wrote was verified separately.
+- **Guards not wired outside the carve:** `holdout_provider` and the `composed` factory are non-strict
+  and take no spin-offs; spin-offs are not persisted. Matters when the universe changes.
+- **Cache `fetch_incremental`** is unused; its key ignores the feed.
+- **`holdout_min_t_stat = 2.0`** is in the thresholds file and the original FOLLOWUPS but had no entry in
+  the later specs; it is recorded again in FOLLOWUPS now.
+- No per-strategy timeout exists; a hanging strategy blocks the pipeline.
+
 ## What is next (as of 2026-10-20)
 
 True PBO has landed, so the lock now covers everything and the diff to review is final. Order:

@@ -83,3 +83,35 @@ def test_reconcile_without_config_uses_threshold_defaults() -> None:
     assert reconcile(bars, list(bars), source="o") == reconcile(
         bars, list(bars), source="o", config=ReconcileConfig.from_thresholds()
     )
+
+
+def test_symbol_with_zero_overlap_fails_even_when_pooled_overlap_is_fine() -> None:
+    covered = [b for s in ("AAA", "BBB", "CCC") for b in normal_series(s, n=40)]
+    uncovered = normal_series("BRK.B", n=5)
+    other = [*covered, *normal_series("BRK-B", n=5)]  # symbol-format mismatch: no key matches
+    report = reconcile([*covered, *uncovered], other, source="yahoo")
+    assert report.compared == len(covered)
+    assert not report.ok
+    assert "no overlap for: BRK.B" in report.reason
+
+
+def test_zero_overlap_reason_names_all_uncovered_symbols_sorted() -> None:
+    covered = [b for s in ("AAA", "BBB", "CCC") for b in normal_series(s, n=40)]
+    primary = [*covered, *normal_series("ZZZ", n=2), *normal_series("MMM", n=2)]
+    report = reconcile(primary, covered, source="yahoo")
+    assert not report.ok
+    assert "no overlap for: MMM, ZZZ" in report.reason
+
+
+def test_all_symbols_covered_is_still_ok() -> None:
+    bars = [b for s in ("AAA", "BBB") for b in normal_series(s, n=30)]
+    report = reconcile(bars, list(bars), source="yahoo")
+    assert report.ok
+    assert report.reason == ""
+
+
+def test_partially_covered_symbol_does_not_trip_the_per_symbol_rule() -> None:
+    full = normal_series("AAA", n=100)
+    thin = normal_series("BBB", n=10)
+    report = reconcile([*full, *thin], [*full, *thin[:1]], source="yahoo")  # 101/110 > 90%
+    assert report.ok

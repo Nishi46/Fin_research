@@ -1,6 +1,7 @@
 import os
 import threading
-from datetime import UTC, date, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -287,3 +288,111 @@ def test_research_only_reads_never_apply_holdout_split(split: SplitData) -> None
     got = prov.bars(["AAA", "BBB"], end)
     assert all(raw[(b.symbol, b.ts)] == b.close for b in got)
     assert prov.corporate_actions(["AAA", "BBB"], end) == []
+
+
+# --- review fixes: manifest sanity, content-vs-manifest range, symlinks, lock file -------------
+
+
+def _rewrite_manifest(d: Path, **changes: object) -> None:
+    """Change fields AND recompute the hash, so only the sanity checks can object."""
+    manifest = load_manifest(d).model_copy(update=changes)
+    digest = holdout_store._hash_for(d, manifest)
+    manifest = manifest.model_copy(update={"content_sha256": digest})
+    (d / MANIFEST_NAME).write_text(manifest.model_dump_json(indent=2))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"research_end": W.holdout_start},  # research_end must be strictly before holdout_start
+        {"holdout_end": W.holdout_start - timedelta(days=1)},  # holdout_start <= holdout_end
+        {"holdout_years": 0},
+        {"embargo_sessions": 0},
+    ],
+    ids=["research_end_not_before_start", "end_before_start", "zero_years", "zero_embargo"],
+)
+def test_incoherent_manifest_is_refused_even_with_a_matching_hash(
+    tmp_path: Path, split: SplitData, changes: dict[str, object]
+) -> None:
+    d = tmp_path / "hold"
+    _carve(d, split)
+    _rewrite_manifest(d, **changes)
+    with pytest.raises(HoldoutManifestError, match="manifest"):
+        verify_holdout_dir(d)
+
+
+def test_a_one_day_holdout_is_coherent(tmp_path: Path, split: SplitData) -> None:
+    d = tmp_path / "hold"
+    _carve(d, split)
+    # start == end is allowed by the contract; data now lies outside, so it is refused for that
+    # reason only (covered below), not for the date ordering.
+    _rewrite_manifest(d, holdout_end=W.holdout_start)
+    with pytest.raises(HoldoutManifestError, match="outside"):
+        verify_holdout_dir(d)
+
+
+def test_bars_after_holdout_end_contradict_the_manifest(tmp_path: Path, split: SplitData) -> None:
+    d = tmp_path / "hold"
+    early_end = replace(W, holdout_end=SESSIONS[SESSIONS.index(W.holdout_start) + 5])
+    write_holdout(
+        d, split, early_end, source_snapshot_id="s", holdout_years=1, code_version="c", now=NOW
+    )
+    with pytest.raises(HoldoutManifestError, match="outside"):
+        verify_holdout_dir(d)
+
+
+def test_bars_on_or_before_research_end_contradict_the_manifest(
+    tmp_path: Path, split: SplitData
+) -> None:
+    d = tmp_path / "hold"
+    first_embargo = SESSIONS[SESSIONS.index(W.holdout_start) - 3]
+    late = replace(W, research_end=first_embargo)  # the first embargo bar is now "research"
+    write_holdout(
+        d, split, late, source_snapshot_id="s", holdout_years=1, code_version="c", now=NOW
+    )
+    with pytest.raises(HoldoutManifestError, match="outside"):
+        verify_holdout_dir(d)
+
+
+def test_symlinked_bar_file_is_refused(tmp_path: Path, split: SplitData) -> None:
+    d = tmp_path / "hold"
+    _carve(d, split)
+    target = d / "bars" / "AAA.parquet"
+    elsewhere = tmp_path / "copy.parquet"
+    elsewhere.write_bytes(target.read_bytes())  # identical bytes: the hash alone cannot object
+    target.unlink()
+    target.symlink_to(elsewhere)
+    with pytest.raises(HoldoutManifestError, match="symlink"):
+        verify_holdout_dir(d)
+
+
+def test_symlinked_actions_file_is_refused(tmp_path: Path, split: SplitData) -> None:
+    d = tmp_path / "hold"
+    _carve(d, split)
+    target = d / "actions.parquet"
+    elsewhere = tmp_path / "actions_copy.parquet"
+    elsewhere.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(elsewhere)
+    with pytest.raises(HoldoutManifestError, match="symlink"):
+        verify_holdout_dir(d)
+
+
+def test_symlinked_bars_directory_is_refused(tmp_path: Path, split: SplitData) -> None:
+    d = tmp_path / "hold"
+    _carve(d, split)
+    moved = tmp_path / "bars_elsewhere"
+    (d / "bars").rename(moved)
+    (d / "bars").symlink_to(moved, target_is_directory=True)
+    with pytest.raises(HoldoutManifestError, match="symlink"):
+        verify_holdout_dir(d)
+
+
+def test_gate_lock_file_is_allowed_and_not_hashed(tmp_path: Path, split: SplitData) -> None:
+    d = tmp_path / "hold"
+    m = _carve(d, split)
+    lock = d / "holdout_ledger.lock"
+    lock.write_text("")
+    assert verify_holdout_dir(d) == m
+    lock.write_text("changed")
+    assert verify_holdout_dir(d) == m

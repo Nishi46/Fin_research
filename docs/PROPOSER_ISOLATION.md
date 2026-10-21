@@ -21,6 +21,26 @@ network connections to exfiltrate data; place orders; or run unbounded work.
 
 Not in scope: a malicious owner, or a kernel or container escape.
 
+## Where the strategy code runs is the hard part (found in the 2026-10-20 review)
+
+Today a strategy is a Python object handed to `run_pipeline` and called inside the grader's own
+process. For the hidden-holdout run, that process holds the holdout path, the manifest, the ledger and
+a provider over the holdout bars. So proposer-written code would execute with exactly the access the
+isolation is meant to deny, whatever container the proposer itself lives in. `DataView` hides its
+provider only by convention (`_provider` is a plain attribute), and the AST tripwire in
+`tools/check_strategy_sandbox.py` says of itself that it is not a sandbox.
+
+Keeping the proposer's own process isolated is therefore not enough. Strategy code must be executed in
+a separate, sandboxed process during grading, and:
+- it receives data only through a narrow channel (for example bars up to `asof` serialised to it per
+  call), never a path to the holdout directory or the registry, and never a provider object;
+- the holdout run feeds it holdout bars the same way, while the grader process keeps the files;
+- it returns an `Intent` and nothing else; a timeout kills it; it has no network and no keys.
+
+The container scripts in `sandbox/` are a starting point for that sandbox, but the run loop that calls
+strategies across a process boundary does not exist yet. It is build step 5 design work and the main
+open item, ahead of the container choice.
+
 ## What the proposer may and may not touch
 
 | Resource | Proposer access |
@@ -75,6 +95,21 @@ daemon itself is root-equivalent, so never mount the Docker socket into the cont
 Use B (container) for the proposer, with the gate on the owner side, and keep the A-style discipline
 (0700 on secrets) as a second layer. If Docker is unwanted, A is acceptable provided the egress
 question is answered.
+
+## Implemented for option B (2026-10-20, written but not yet run)
+
+- `sandbox/run_proposer.sh <command...>` starts a container with the hardening above: repo read-only,
+  `strategies/` the only read-write mount, research cache read-only, every `.env*` file masked with an
+  empty file (the repo mount contains the real `.env` with the Alpaca keys), no holdout directory, no
+  Docker socket, no network by default (`PROPOSER_NETWORK` opts in), non-root, read-only root, all
+  capabilities dropped, CPU, memory and process limits.
+- `sandbox/verify_isolation.sh` runs the checklist below through that same launcher and exits non-zero
+  if any "must fail" line succeeds.
+- Status: the scripts' syntax and the exact `docker run` arguments were checked with a stand-in
+  `docker`; they have NOT been run, because the Docker daemon was not running. To run them: start
+  Docker Desktop, then `sandbox/verify_isolation.sh` (first run pulls `python:3.12-slim`).
+- Still open: how the proposer reaches its model API with the network off (a proxy allow-list), where
+  the gate runs and how code is submitted to it, and per-candidate resource limits.
 
 ## Verification checklist (run these before enabling the proposer, and after any change)
 

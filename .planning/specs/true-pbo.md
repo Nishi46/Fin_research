@@ -31,6 +31,23 @@ A PBO that is computed over the daily returns of many genuinely different trials
 
 **R4. Pipeline wiring.** After walk-forward produces the candidate's net daily returns, store them under the group key, then compute CSCV over the candidate plus up to `pbo_max_peers` earlier trials in the same group (most recent first). Every trial that gets a return series counts, including ones later rejected: dropping the failures would hide the real N.
 
+**R4a. Which trials contribute a series (owner decision 2026-10-20, amends R4).** A trial's series is
+stored only after it passes the lookahead and walk-forward stages, not for every trial. Rationale: a
+strategy that cheats through lookahead has enormous in-sample and "out-of-sample" returns, so its
+column would dominate the field and push PBO toward zero for everything. The real N for selection bias
+is carried by DSR, which counts every logged trial. Consequence: reaching `pbo_min_trials` peers takes
+roughly 100 submissions if about 40% survive walk-forward, so the PBO gate is inert early on.
+
+**R4b. Semantics (owner decision 2026-10-20).** PBO here is a FIELD-LEVEL overfitting diagnostic. CSCV
+asks whether the in-sample winner of the whole group of trials, the candidate included, holds up out of
+sample. It is not a per-candidate test: next to one genuinely strong peer, a weak candidate also sees a
+low PBO. The per-candidate rejection is done by DSR and the later stages. A PBO failure means the field
+looks overfit and the candidate is part of that field; reports and messages must say "field PBO" and
+never "this candidate overfits". Measured behaviour (2,200 days, 16 blocks, 60 draws): pure noise gives
+a mean PBO of about 0.5 at every peer count with wide spread (rejected 40 to 50 percent of the time at
+the 0.5 gate); a genuine edge at annualised Sharpe 1.0 is rejected 8 to 15 percent of the time, Sharpe
+2.0 essentially never. The gate adds rejections only; it cannot make a candidate pass.
+
 **R5. Gate.** At the trial-adjusted stage, fail when PBO > `pbo_max` once the group has at least `pbo_min_trials` trials. Below that, record `pbo_gating = 0.0` and the reason (insufficient peers), as today. The existing neighbour-based number stays as an informational metric `pbo_neighbours`.
 
 **R6. New thresholds** in `harness/thresholds.py` (owner approves values): `pbo_min_trials`, `pbo_max_peers`, `pbo_n_blocks`. Decided 2026-10-20: 30, 200, 16.

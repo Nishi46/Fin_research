@@ -21,6 +21,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
@@ -32,8 +33,11 @@ from harness.data.window import Windows
 
 MANIFEST_NAME = "holdout_manifest.json"
 _LEDGER_NAME = "holdout_ledger.jsonl"  # the gate's file; kept in sync with validation.holdout
+_LOCK_NAME = "holdout_ledger.lock"  # the gate's flock file; never hashed
+_GATE_FILES = (_LEDGER_NAME, _LOCK_NAME)
 _ACTIONS_NAME = "actions.parquet"
 _BARS_DIR = "bars"
+_NY = ZoneInfo("America/New_York")
 _DIR_MODE = 0o700
 _GROUP_OTHER_BITS = 0o077
 
@@ -84,7 +88,7 @@ def _data_files(directory: Path) -> list[Path]:
                 raise HoldoutManifestError(f"unexpected directory in holdout store: {path.name}")
             continue
         rel = path.relative_to(directory)
-        if rel.as_posix() in (MANIFEST_NAME, _LEDGER_NAME):
+        if rel.as_posix() in (MANIFEST_NAME, *_GATE_FILES):
             continue
         if rel.as_posix() == _ACTIONS_NAME or (
             rel.parent.as_posix() == _BARS_DIR and rel.suffix == ".parquet"
@@ -167,7 +171,7 @@ def _carve_lock(directory: Path) -> Iterator[None]:
 def _prepare_target(directory: Path) -> None:
     """Allow only an empty dir, the gate's ledger, or leftovers of an unfinished carve."""
     for child in directory.iterdir():
-        if child.name == _LEDGER_NAME and child.is_file():
+        if child.name in _GATE_FILES and child.is_file():
             continue
         if child.name == _ACTIONS_NAME and child.is_file():
             continue
@@ -261,10 +265,44 @@ def verify_holdout_dir(directory: Path) -> HoldoutManifest:
             f"holdout directory {directory} is accessible to group/others "
             f"(mode {mode:o}); fix with: chmod 700 {directory}"
         )
+    _refuse_symlinks(directory)
     manifest = load_manifest(directory)
+    _check_manifest_sanity(manifest)
     if _hash_for(directory, manifest) != manifest.content_sha256:
         raise HoldoutManifestError(f"holdout content does not match manifest hash: {directory}")
+    _check_content_range(directory, manifest)
     return manifest
+
+
+def _refuse_symlinks(directory: Path) -> None:
+    """A link could point the gate at data the manifest hash never covered."""
+    for path in (directory, *directory.rglob("*")):
+        if path.is_symlink():
+            raise HoldoutManifestError(f"symlink in holdout store: {path.name}")
+
+
+def _check_manifest_sanity(m: HoldoutManifest) -> None:
+    if not m.research_end < m.holdout_start <= m.holdout_end:
+        raise HoldoutManifestError(
+            "holdout manifest dates are incoherent: need research_end < holdout_start "
+            "<= holdout_end"
+        )
+    if m.holdout_years < 1 or m.embargo_sessions < 1:
+        raise HoldoutManifestError("holdout manifest needs holdout_years >= 1 and embargo >= 1")
+
+
+def _check_content_range(directory: Path, m: HoldoutManifest) -> None:
+    """Every bar and action must lie after research_end and not past holdout_end."""
+    cache = ParquetCache(directory)
+    dates: list[date] = []
+    for path in sorted((directory / _BARS_DIR).glob("*.parquet")):
+        dates.extend(b.ts.astimezone(_NY).date() for b in cache.load(path.stem))
+    dates.extend(a.effective_at.astimezone(UTC).date() for a in ActionsStore(directory).load())
+    if any(not m.research_end < d <= m.holdout_end for d in dates):
+        raise HoldoutManifestError(
+            "holdout contents lie outside the manifest window "
+            f"({m.research_end} exclusive to {m.holdout_end} inclusive)"
+        )
 
 
 def read_holdout(directory: Path) -> tuple[list[Bar], list[CorporateAction]]:

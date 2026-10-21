@@ -60,7 +60,9 @@ class SqliteRegistry:
                 f"INSERT INTO trials ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", row
             )
         except sqlite3.IntegrityError as err:
-            raise DuplicateTrialError(str(trial.id)) from err
+            if _is_duplicate(err):
+                raise DuplicateTrialError(str(trial.id)) from err
+            raise
 
     def get(self, trial_id: uuid.UUID) -> Trial | None:
         row = self._conn.execute(
@@ -110,7 +112,9 @@ class SqliteRegistry:
             )
         except sqlite3.IntegrityError as err:
             self._conn.execute("ROLLBACK")
-            raise DuplicateTrialError(str(series.trial_id)) from err
+            if _is_duplicate(err):
+                raise DuplicateTrialError(str(series.trial_id)) from err
+            raise
         except BaseException:
             self._conn.execute("ROLLBACK")
             raise
@@ -130,6 +134,15 @@ class SqliteRegistry:
             _decode_series(uuid.UUID(str(trial_id)), group_key, payload, int(n))
             for trial_id, payload, n in rows
         ]
+
+
+# A primary-key clash, or the no_replace trigger that fires first on a repeated id. Anything else
+# (CHECK, NOT NULL) is a bug or corruption and must surface as itself.
+_DUPLICATE_MARKERS = ("UNIQUE constraint failed", "append-only table")
+
+
+def _is_duplicate(err: sqlite3.IntegrityError) -> bool:
+    return any(marker in str(err) for marker in _DUPLICATE_MARKERS)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)

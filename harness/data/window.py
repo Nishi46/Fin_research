@@ -69,6 +69,10 @@ class ResearchWindow:
         self._research_end = research_end
         self._cap = session_close_utc(research_end)
 
+    @property
+    def research_end(self) -> date:
+        return self._research_end
+
     def snapshot(self) -> Snapshot:
         snap = self._inner.snapshot()
         if snap.end <= self._cap:

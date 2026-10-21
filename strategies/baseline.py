@@ -1,8 +1,21 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
+from contracts import FrozenMap
 from contracts.dataview import DataView
 from contracts.intent import Intent
+from contracts.strategy import Params, ParamValue
+
+_PARAM_NAMES = frozenset({"top_n", "lookback"})
+
+
+def _whole_number(name: str, value: object) -> int:
+    # Neighbours are derived by rounding, so whole-number floats are fine; bool is not a knob.
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{name} must be a whole number, got {value!r}")
+    return int(value)
 
 
 class BaselineReversal:
@@ -18,6 +31,23 @@ class BaselineReversal:
     @property
     def strategy_id(self) -> str:
         return "baseline_reversal"
+
+    @property
+    def params(self) -> Params:
+        return FrozenMap[str, ParamValue]({"top_n": self._top_n, "lookback": self._lookback})
+
+    @property
+    def lookback_bars(self) -> int:
+        return self._lookback + 1
+
+    def with_params(self, params: Mapping[str, ParamValue]) -> "BaselineReversal":
+        if set(params) != _PARAM_NAMES:
+            raise ValueError(f"params must be exactly {sorted(_PARAM_NAMES)}, got {sorted(params)}")
+        return BaselineReversal(
+            self._symbols,
+            top_n=_whole_number("top_n", params["top_n"]),
+            lookback=_whole_number("lookback", params["lookback"]),
+        )
 
     def generate(self, data: DataView, asof: datetime) -> Intent:
         closes: dict[str, list[float]] = {s: [] for s in self._symbols}

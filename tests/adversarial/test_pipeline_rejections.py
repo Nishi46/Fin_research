@@ -29,6 +29,7 @@ from tests.adversarial.worlds import (
     planted_edge_world,
     regime_world,
 )
+from tests.helpers import research_provider
 
 SEED = 0
 SINGLE_REGIME_SEED = 26  # chosen for a world property (neighbour stability, 0.94), not a stage
@@ -54,7 +55,7 @@ def _submit(
         strategy=strategy,
         build=build,
         params=params,
-        provider=world.provider(),
+        provider=research_provider(world.provider(), end=world.timestamps[-1]),
         symbols=list(world.symbols),
         start=world.timestamps[0],
         end=world.timestamps[-1],

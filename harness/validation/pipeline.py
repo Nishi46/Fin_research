@@ -6,8 +6,22 @@ be evaluated fails rather than being skipped.
 
 Exactly one `Trial` is appended to the registry per call, whatever happens: a pass, a rejection
 at any stage, or an unexpected exception (outcome ERROR, `stage_reached` is the stage that
-raised). The append is in a `finally`, so no path skips it. If the append itself fails, that
-exception propagates, because a silent loss of a trial would corrupt the trial count.
+raised). The append is in a `finally`, so no path skips it, `KeyboardInterrupt`/`SystemExit`
+included (the trial is logged as ERROR, then the exception propagates). Building the trial cannot
+skip it either: if computing the trial metrics (or the Trial itself) raises, a minimal ERROR trial
+with the safely serialisable metrics is logged instead. If the append itself fails, that exception
+propagates, because a silent loss of a trial would corrupt the trial count. The return series is
+filed before the trial row, so a failed append leaves an orphan series that still counts as a PBO
+peer: that case is logged at CRITICAL with the trial id (the registry is append-only, so nothing is
+deleted).
+
+`provider` must be a `harness.data.window.ResearchWindow` and `end` must not be later than its
+`research_end` session close; otherwise TypeError / ValueError is raised before anything else, and
+no trial is logged (these are programming errors, not trials).
+
+`build` and `params` are optional: for a `ParametrizedStrategy` they default to its `with_params`
+and `dict(params)`; explicit arguments win. Without either, STABILITY fails (no build) and params
+are logged as {}.
 
 `run_pipeline` is the only public entry point and takes no thresholds: a caller that could pass
 thresholds could weaken the grader. Tests drive `_run_pipeline`, which does.
@@ -19,13 +33,16 @@ Notes the owner should know:
 * Regimes are derived at the floors stage from the benchmark's bars in the provider up to `end`
   (`harness.data.regimes.derive_regimes`); no usable benchmark bars fails FLOORS, never skips it.
 * PBO is computed at stage 3 by CSCV across TRIALS: the candidate's net daily returns are stored
-  in the registry under a group key (same data snapshot, window, cost multiplier and capital) and
-  compared with up to `pbo_max_peers` earlier trials of that group. Once the group has
-  `pbo_min_trials` trials it gates (`harness.validation.peers`); below that it is recorded as not
-  gating. Every trial that reaches stage 3 stores a series, including ones rejected later, so the
-  field is the real N. A trial rejected before stage 3 stores none. A series whose timestamps
-  differ from the group's is refused: PBO is then not computed and the reason is in the stage
-  text. Re-submitted identical code is a new trial and counts as an extra peer (owner decision).
+  in the registry under a group key (same data snapshot, window, cost model and multiplier, and
+  capital) and compared with up to `pbo_max_peers` earlier trials of that group. Once the group
+  has `pbo_min_trials` trials it gates (`harness.validation.peers`); below that it is recorded as
+  not gating. Every trial that reaches stage 3 stores a series, including ones rejected later, so
+  the field is the real N. A trial rejected before stage 3 stores none. A series whose timestamps
+  differ from the group's is refused: PBO is then not computed and the reason is in the stage text
+  and `trial_adjusted.pbo_refused = 1.0`. Once the group is established (it would have
+  `pbo_min_trials` trials with the candidate) a refusal FAILS the stage, because otherwise a
+  calendar mismatch would switch the gate off; below that it is recorded and does not gate.
+  Re-submitted identical code is a new trial and counts as an extra peer (owner decision).
   Metrics: `trial_adjusted.pbo`, `.pbo_computed`, `.pbo_gating`, `.pbo_group_size`.
 * The old PBO over the candidate's derived neighbours is kept as information only, because
   near-identical neighbours measure which neighbour wins, not overfitting:
@@ -65,20 +82,24 @@ from contracts import (
     Strategy,
     Trial,
 )
+from contracts.strategy import ParametrizedStrategy
 from harness.api import BacktestResult, Regime, StageResult
+from harness.data.calendar import session_close_utc
 from harness.data.regimes import derive_regimes
+from harness.data.window import ResearchWindow
 from harness.engine.runner import detect_code_version, run_backtest
 from harness.thresholds import DEFAULT_THRESHOLDS, Thresholds
 from harness.validation.cost_sensitivity import cost_sensitivity_stage
 from harness.validation.dsr import (
     SHARPE_METRIC,
     SHARPE_MISSING_FLAG,
+    PboRefusal,
     sharpe_moments,
     trial_adjusted_stage,
 )
 from harness.validation.floors import floors_stage
 from harness.validation.lookahead import check_lookahead
-from harness.validation.peers import group_key, peer_matrix
+from harness.validation.peers import cost_model_fingerprint, group_key, peer_matrix
 from harness.validation.stability import MIN_POINTS, neighbour_points, stability_stage
 from harness.validation.walk_forward import walk_forward_stage
 
@@ -198,11 +219,43 @@ def _fail(stage: Stage, reason: str) -> StageResult:
     return StageResult(stage=stage, passed=False, reason=reason, metrics={})
 
 
+def _resolve_build_and_params(
+    strategy: Strategy,
+    build: Callable[[Mapping[str, Any]], Strategy] | None,
+    params: Mapping[str, int | float] | None,
+) -> tuple[Callable[[Mapping[str, Any]], Strategy] | None, Mapping[str, int | float]]:
+    """Fill a missing `build`/`params` from a ParametrizedStrategy; explicit arguments win."""
+    if isinstance(strategy, ParametrizedStrategy):
+        if build is None:
+            build = strategy.with_params
+        if params is None:
+            params = dict(strategy.params)
+    return build, params if params is not None else {}
+
+
+def _require_research_window(provider: DataProvider, end: datetime) -> None:
+    """Refuse a provider that could serve data after research_end, before any trial is logged.
+
+    Both failures are programming errors, not trials: nothing is appended to the registry.
+    """
+    if not isinstance(provider, ResearchWindow):
+        raise TypeError(
+            "run_pipeline needs a ResearchWindow-wrapped provider so grading can never see "
+            f"data after research_end (got {type(provider).__name__})"
+        )
+    close = session_close_utc(provider.research_end)
+    if end > close:
+        raise ValueError(
+            f"end {end.isoformat()} is later than the close of research_end "
+            f"{provider.research_end} ({close.isoformat()}); the window would clamp the run"
+        )
+
+
 def run_pipeline(
     *,
     strategy: Strategy,
-    build: Callable[[Mapping[str, Any]], Strategy] | None,
-    params: Mapping[str, int | float],
+    build: Callable[[Mapping[str, Any]], Strategy] | None = None,
+    params: Mapping[str, int | float] | None = None,
     provider: DataProvider,
     symbols: Sequence[str],
     start: datetime,
@@ -231,8 +284,8 @@ def run_pipeline(
 def _run_pipeline(
     *,
     strategy: Strategy,
-    build: Callable[[Mapping[str, Any]], Strategy] | None,
-    params: Mapping[str, int | float],
+    build: Callable[[Mapping[str, Any]], Strategy] | None = None,
+    params: Mapping[str, int | float] | None = None,
     provider: DataProvider,
     symbols: Sequence[str],
     start: datetime,
@@ -243,6 +296,8 @@ def _run_pipeline(
     cost_model: CostModel | None = None,
     thresholds: Thresholds,
 ) -> PipelineResult:
+    _require_research_window(provider, end)
+    build, params = _resolve_build_and_params(strategy, build, params)
     code_version = detect_code_version()
     trial_id = uuid.uuid4()  # needed before the trial row exists: the return series is filed by it
     stages: list[StageResult] = []
@@ -273,96 +328,165 @@ def _run_pipeline(
 
     try:
         try:
-            snapshot = provider.snapshot()
-            snapshot_id, survivorship_biased = snapshot.id, snapshot.survivorship_biased
-        except Exception:
-            logger.exception("snapshot unavailable for trial record")
+            try:
+                snapshot = provider.snapshot()
+                snapshot_id, survivorship_biased = snapshot.id, snapshot.survivorship_biased
+            except Exception:
+                logger.exception("snapshot unavailable for trial record")
 
-        lookahead_early: StageResult | None = None
-        try:
-            base = backtest(strategy)
-        except LookaheadError as err:
-            lookahead_early = _fail(Stage.LOOKAHEAD, f"lookahead: strategy read the future: {err}")
-        if base is not None:
-            snapshot_id, survivorship_biased = base.snapshot_id, base.survivorship_biased
-
-        def run_stages() -> StageResult | None:
-            """Return the failing stage result, or None if all six pass."""
-            nonlocal current
-            assert base is not None
-            current = Stage.LOOKAHEAD
-            if not record(
-                check_lookahead(
-                    strategy,
-                    provider,
-                    symbols,
-                    _check_times(base.timestamps, thresholds.lookahead_check_count),
+            lookahead_early: StageResult | None = None
+            try:
+                base = backtest(strategy)
+            except LookaheadError as err:
+                lookahead_early = _fail(
+                    Stage.LOOKAHEAD, f"lookahead: strategy read the future: {err}"
                 )
-            ):
-                return stages[-1]
-            current = Stage.WALK_FORWARD
-            if not record(walk_forward_stage(base, thresholds)):
-                return stages[-1]
-            current = Stage.TRIAL_ADJUSTED
-            # The neighbours are backtested here only to record PBO; PBO never gates. Any
-            # failure is kept and surfaces at the stability stage, where it belongs.
-            runs = _ConfigurationRuns(strategy, build, params, base, backtest, thresholds)
-            runs.prepare()
-            peers, pbo_note = _store_and_load_peers(
-                registry, trial_id, base, start, end, capital, thresholds
-            )
-            if not record(
-                trial_adjusted_stage(
-                    base,
-                    registry,
-                    peer_returns=peers,
-                    neighbour_returns=runs.matrix(),
-                    pbo_note=pbo_note,
-                    n_trials=registry.count() + 1,
-                    thresholds=thresholds,
-                )
-            ):
-                return stages[-1]
-            current = Stage.COST_SENSITIVITY
-            if not record(
-                cost_sensitivity_stage(base, lambda m: backtest(strategy, m), thresholds)
-            ):
-                return stages[-1]
-            current = Stage.STABILITY
-            if not record(runs.stability(thresholds)):
-                return stages[-1]
-            current = Stage.FLOORS
-            if not record(_floors(base, provider, end, thresholds)):
-                return stages[-1]
-            return None
+            if base is not None:
+                snapshot_id, survivorship_biased = base.snapshot_id, base.survivorship_biased
 
-        if lookahead_early is not None:
-            stages.append(lookahead_early)
-            outcome = Outcome.REJECTED
-        else:
-            failed = run_stages()
-            outcome = Outcome.REJECTED if failed is not None else Outcome.PASSED
-    except Exception as err:
-        logger.exception("pipeline stage %s raised", current.value)
+            def run_stages() -> StageResult | None:
+                """Return the failing stage result, or None if all six pass."""
+                nonlocal current
+                assert base is not None
+                current = Stage.LOOKAHEAD
+                if not record(
+                    check_lookahead(
+                        strategy,
+                        provider,
+                        symbols,
+                        _check_times(base.timestamps, thresholds.lookahead_check_count),
+                    )
+                ):
+                    return stages[-1]
+                current = Stage.WALK_FORWARD
+                if not record(walk_forward_stage(base, thresholds)):
+                    return stages[-1]
+                current = Stage.TRIAL_ADJUSTED
+                # The neighbours are backtested here only to record PBO; PBO never gates. Any
+                # failure is kept and surfaces at the stability stage, where it belongs.
+                runs = _ConfigurationRuns(strategy, build, params, base, backtest, thresholds)
+                runs.prepare()
+                peers, pbo_note, refusal = _store_and_load_peers(
+                    registry, trial_id, base, start, end, capital, cost_model, thresholds
+                )
+                if not record(
+                    trial_adjusted_stage(
+                        base,
+                        registry,
+                        peer_returns=peers,
+                        neighbour_returns=runs.matrix(),
+                        pbo_note=pbo_note,
+                        pbo_refusal=refusal,
+                        n_trials=registry.count() + 1,
+                        thresholds=thresholds,
+                    )
+                ):
+                    return stages[-1]
+                current = Stage.COST_SENSITIVITY
+                if not record(
+                    cost_sensitivity_stage(base, lambda m: backtest(strategy, m), thresholds)
+                ):
+                    return stages[-1]
+                current = Stage.STABILITY
+                if not record(runs.stability(thresholds)):
+                    return stages[-1]
+                current = Stage.FLOORS
+                if not record(_floors(base, provider, end, thresholds)):
+                    return stages[-1]
+                return None
+
+            if lookahead_early is not None:
+                stages.append(lookahead_early)
+                outcome = Outcome.REJECTED
+            else:
+                failed = run_stages()
+                outcome = Outcome.REJECTED if failed is not None else Outcome.PASSED
+        except Exception as err:
+            logger.exception("pipeline stage %s raised", current.value)
+            outcome = Outcome.ERROR
+            if isinstance(err, _NanMetricError):
+                metrics.update(err.partial)
+            metrics["error"] = 1.0
+            stages.append(_fail(current, f"error in {current.value}: {type(err).__name__}: {err}"))
+    except BaseException:
+        # KeyboardInterrupt / SystemExit are not caught above: the trial is logged by the finally
+        # below as ERROR, then this propagates.
         outcome = Outcome.ERROR
-        if isinstance(err, _NanMetricError):
-            metrics.update(err.partial)
         metrics["error"] = 1.0
-        stages.append(_fail(current, f"error in {current.value}: {type(err).__name__}: {err}"))
-
-    trial = _make_trial(
-        trial_id=trial_id,
-        strategy=strategy,
-        params=params,
-        capital=capital,
-        snapshot_id=snapshot_id,
-        survivorship_biased=survivorship_biased,
-        stage=current,
-        outcome=outcome,
-        metrics=_trial_metrics(metrics, base),
+        stages.append(_fail(current, f"interrupted in {current.value}"))
+        raise
+    finally:
+        trial = _log_trial(
+            registry,
+            trial_id=trial_id,
+            strategy=strategy,
+            params=params,
+            capital=capital,
+            snapshot_id=snapshot_id,
+            survivorship_biased=survivorship_biased,
+            stage=current,
+            outcome=outcome,
+            metrics=metrics,
+            base=base,
+        )
+    return PipelineResult(
+        stages=tuple(stages),
+        stage_reached=trial.stage_reached,
+        outcome=trial.outcome,
+        trial=trial,
     )
-    registry.append(trial)
-    return PipelineResult(stages=tuple(stages), stage_reached=current, outcome=outcome, trial=trial)
+
+
+def _log_trial(
+    registry: Registry,
+    *,
+    trial_id: uuid.UUID,
+    strategy: Strategy,
+    params: Mapping[str, int | float],
+    capital: CapitalConfig,
+    snapshot_id: str,
+    survivorship_biased: bool,
+    stage: Stage,
+    outcome: Outcome,
+    metrics: dict[str, float],
+    base: BacktestResult | None,
+) -> Trial:
+    """Build and append the trial; building it cannot prevent the append."""
+    common: dict[str, Any] = {
+        "trial_id": trial_id,
+        "strategy": strategy,
+        "params": params,
+        "capital": capital,
+        "snapshot_id": snapshot_id,
+        "survivorship_biased": survivorship_biased,
+        "stage": stage,
+    }
+    try:
+        trial = _make_trial(**common, outcome=outcome, metrics=_trial_metrics(metrics, base))
+    except Exception:
+        logger.exception("building the trial record failed; logging a minimal ERROR trial")
+        trial = _make_trial(**common, outcome=Outcome.ERROR, metrics=_fallback_metrics(metrics))
+    try:
+        registry.append(trial)
+    except BaseException:
+        logger.critical(
+            "trial %s was NOT recorded; if its return series was filed it is an orphan peer "
+            "with no trial row (return series filed before the trial append)",
+            trial_id,
+            exc_info=True,
+        )
+        raise
+    return trial
+
+
+def _fallback_metrics(metrics: Mapping[str, float]) -> dict[str, float]:
+    """The finite metrics gathered so far, plus the error and Sharpe-missing flags."""
+    out = {k: v for k, v in metrics.items() if math.isfinite(v)}
+    out["error"] = 1.0
+    out["trial_metrics_failed"] = 1.0
+    out.setdefault(SHARPE_METRIC, 0.0)
+    out[SHARPE_MISSING_FLAG] = 1.0
+    return out
 
 
 def _store_and_load_peers(
@@ -372,26 +496,31 @@ def _store_and_load_peers(
     start: datetime,
     end: datetime,
     capital: CapitalConfig,
+    cost_model: CostModel | None,
     thresholds: Thresholds,
-) -> tuple[NDArray[np.float64] | None, str | None]:
+) -> tuple[NDArray[np.float64] | None, str | None, PboRefusal | None]:
     """File the candidate's returns under its group, then build the matrix PBO runs on.
 
-    Returns (matrix, None), or (None, reason) when no matrix exists. Only a timestamp mismatch is
-    absorbed (spec edge 2: the trial still logs with PBO not computed); any other registry
-    failure propagates and ends the run as ERROR rather than quietly skipping the gate.
+    Returns (matrix, None, None), or (None, reason, refusal-or-None) when no matrix exists. Only a
+    timestamp mismatch is absorbed (the trial still logs with PBO not computed); any other
+    registry failure propagates and ends the run as ERROR rather than quietly skipping the gate.
+    A mismatch in a group that already has enough trials to gate is reported as `fails=True`, so
+    the stage fails instead of passing on DSR alone.
     """
     if not base.daily_returns:
-        return None, "no daily returns to compare"
+        return None, "no daily returns to compare", None
+    key = group_key(
+        snapshot_id=base.snapshot_id,
+        start=start,
+        end=end,
+        cost_multiplier=base.cost_multiplier,
+        capital_amount=capital.amount,
+        capital_currency=capital.currency,
+        cost_fingerprint=cost_model_fingerprint(cost_model),
+    )
     series = ReturnSeries(
         trial_id=trial_id,
-        group_key=group_key(
-            snapshot_id=base.snapshot_id,
-            start=start,
-            end=end,
-            cost_multiplier=base.cost_multiplier,
-            capital_amount=capital.amount,
-            capital_currency=capital.currency,
-        ),
+        group_key=key,
         timestamps=base.timestamps,
         returns=base.daily_returns,
     )
@@ -399,8 +528,16 @@ def _store_and_load_peers(
         registry.append_returns(series)
     except ReturnSeriesMismatchError:
         logger.warning("return series refused: timestamps differ from the group's")
-        return None, "return series refused: its timestamps differ from the group's"
-    return peer_matrix(registry, series, max_peers=thresholds.pbo_max_peers), None
+        # The candidate would be one of the group, so the group gates when it already has
+        # pbo_min_trials - 1 stored trials. The limit keeps this read cheap.
+        needed = max(thresholds.pbo_min_trials - 1, 1)
+        established = len(registry.returns_for_group(key, limit=needed)) >= needed
+        return (
+            None,
+            "return series refused: its timestamps differ from the group's",
+            PboRefusal(fails=established),
+        )
+    return peer_matrix(registry, series, max_peers=thresholds.pbo_max_peers), None, None
 
 
 REPRODUCTION_TOLERANCE = 1e-12

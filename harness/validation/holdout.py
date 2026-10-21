@@ -33,22 +33,27 @@ pipeline) and never supplied by the proposer. Software cannot enforce that alone
 isolation of the holdout from the proposer is the plan before build step 5.
 """
 
+import fcntl
 import json
 import math
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from harness.api import BacktestResult
-from harness.data.holdout_store import verify_holdout_dir
+from harness.data.holdout_store import HoldoutManifestError, verify_holdout_dir
 from harness.thresholds import DEFAULT_THRESHOLDS
 
 HOLDOUT_ENV_VAR = "FIN_RESEARCH_HOLDOUT_DIR"
 LEDGER_NAME = "holdout_ledger.jsonl"
+LOCK_NAME = "holdout_ledger.lock"
+_FILE_MODE = 0o600
 MIN_RETURNS = 2
 _NY = ZoneInfo("America/New_York")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +69,10 @@ class HoldoutLocationError(Exception):
 
 class HoldoutQueryCapError(Exception):
     """The lifetime cap on holdout queries is used up."""
+
+
+class HoldoutLedgerError(Exception):
+    """The ledger cannot be read or trusted; the gate refuses rather than guess."""
 
 
 class HoldoutVerdict(BaseModel):
@@ -110,14 +119,21 @@ class HoldoutGate:
         max_queries: int | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        self._min_t_stat = (
-            DEFAULT_THRESHOLDS.holdout_min_t_stat if min_t_stat is None else min_t_stat
-        )
-        self._max_queries = (
-            DEFAULT_THRESHOLDS.holdout_max_queries if max_queries is None else max_queries
-        )
-        if self._max_queries < 1:
-            raise ValueError("max_queries must be at least 1")
+        floor = DEFAULT_THRESHOLDS.holdout_min_t_stat
+        cap = DEFAULT_THRESHOLDS.holdout_max_queries
+        t_stat = floor if min_t_stat is None else min_t_stat
+        if (
+            isinstance(t_stat, bool)
+            or not isinstance(t_stat, int | float)
+            or not math.isfinite(t_stat)
+            or t_stat < floor
+        ):
+            raise ValueError(f"min_t_stat must be a finite number >= the default {floor}")
+        queries = cap if max_queries is None else max_queries
+        if type(queries) is not int or not 1 <= queries <= cap:
+            raise ValueError(f"max_queries must be an int, at least 1 and at most {cap}")
+        self._min_t_stat = float(t_stat)
+        self._max_queries = queries
         self._environ = environ
 
     def evaluate(
@@ -130,40 +146,80 @@ class HoldoutGate:
         directory = resolve_holdout_dir(self._environ)
         manifest = verify_holdout_dir(directory)
         ledger = directory / LEDGER_NAME
-        recorded = self._lookup(ledger, strategy_id, code_hash)
-        if recorded is not None:
-            return HoldoutVerdict(passed=recorded)
-        if self._queries_used(ledger) >= self._max_queries:
-            raise HoldoutQueryCapError(
-                f"the holdout allows {self._max_queries} queries in total and all are used"
-            )
+        # The lock spans lookup, cap check, run and append, so two processes can neither both
+        # pass the cap nor both run one key.
+        with _exclusive_lock(directory / LOCK_NAME):
+            entries = _read_ledger(ledger)
+            for entry in entries:
+                if entry["strategy_id"] == strategy_id and entry["code_hash"] == code_hash:
+                    return HoldoutVerdict(passed=entry["passed"])
+            if len(entries) >= self._max_queries:
+                raise HoldoutQueryCapError(
+                    f"the holdout allows {self._max_queries} queries in total and all are used"
+                )
 
-        backtest = run(directory)
-        if len(backtest.timestamps) != len(backtest.daily_returns):
-            raise ValueError("timestamps and daily_returns must have the same length")
-        scored = [
-            r
-            for ts, r in zip(backtest.timestamps, backtest.daily_returns, strict=True)
-            if manifest.holdout_start <= ts.astimezone(_NY).date() <= manifest.holdout_end
-        ]
-        passed = holdout_t_statistic(scored) >= self._min_t_stat
-        entry = {"strategy_id": strategy_id, "code_hash": code_hash, "passed": passed}
-        with ledger.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
+            backtest = run(directory)
+            if len(backtest.timestamps) != len(backtest.daily_returns):
+                raise ValueError("timestamps and daily_returns must have the same length")
+            scored = [
+                r
+                for ts, r in zip(backtest.timestamps, backtest.daily_returns, strict=True)
+                if manifest.holdout_start <= ts.astimezone(_NY).date() <= manifest.holdout_end
+            ]
+            passed = holdout_t_statistic(scored) >= self._min_t_stat
+            # The runner had the directory in hand: nothing is recorded unless it is unchanged.
+            if verify_holdout_dir(directory) != manifest:
+                raise HoldoutManifestError("holdout manifest changed while the runner executed")
+            _append_ledger(
+                ledger, {"strategy_id": strategy_id, "code_hash": code_hash, "passed": passed}
+            )
         return HoldoutVerdict(passed=passed)
 
-    @staticmethod
-    def _queries_used(ledger: Path) -> int:
-        if not ledger.exists():
-            return 0
-        return len(ledger.read_text(encoding="utf-8").splitlines())
 
-    @staticmethod
-    def _lookup(ledger: Path, strategy_id: str, code_hash: str) -> bool | None:
-        if not ledger.exists():
-            return None
-        for line in ledger.read_text(encoding="utf-8").splitlines():
+@contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, _FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the flock
+
+
+def _read_ledger(ledger: Path) -> list[dict[str, Any]]:
+    if not ledger.exists():
+        return []
+    try:
+        text = ledger.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise HoldoutLedgerError(f"holdout ledger unreadable: {e}") from e
+    entries: list[dict[str, Any]] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
             entry = json.loads(line)
-            if entry["strategy_id"] == strategy_id and entry["code_hash"] == code_hash:
-                return bool(entry["passed"])
-        return None
+        except ValueError as e:
+            raise HoldoutLedgerError(f"holdout ledger line {number} is not valid JSON") from e
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("strategy_id"), str)
+            or not isinstance(entry.get("code_hash"), str)
+        ):
+            raise HoldoutLedgerError(f"holdout ledger line {number} is malformed")
+        if not isinstance(entry.get("passed"), bool):
+            raise HoldoutLedgerError(f"holdout ledger line {number}: 'passed' must be a boolean")
+        entries.append(entry)
+    return entries
+
+
+def _append_ledger(ledger: Path, entry: Mapping[str, object]) -> None:
+    fd = os.open(ledger, os.O_RDWR | os.O_CREAT | os.O_APPEND, _FILE_MODE)
+    try:
+        size = os.fstat(fd).st_size
+        # A torn earlier write must not fuse with this entry.
+        prefix = b"\n" if size and os.pread(fd, 1, size - 1) != b"\n" else b""
+        os.write(fd, prefix + json.dumps(entry).encode("utf-8") + b"\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)

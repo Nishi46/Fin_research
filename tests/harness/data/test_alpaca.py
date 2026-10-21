@@ -4,12 +4,13 @@ from typing import Any
 
 import pytest
 
-from contracts.data import CorporateActionKind
+from contracts.data import CorporateAction, CorporateActionKind
+from harness.data.adjust import adjust_bars, find_unadjusted_jumps
 from harness.data.alpaca import ACTIONS_PAGE_LIMIT, AlpacaDataClient, UrllibHttpClient
 from harness.data.common import SpinOff
 from harness.data.config import DataConfig
 from harness.data.ratelimit import RateLimiter
-from tests.data_fixtures import load_json
+from tests.data_fixtures import load_json, series
 
 
 class RecordingHttp:
@@ -227,3 +228,65 @@ def test_fetch_spin_offs_malformed_row_raises() -> None:
     http = RecordingHttp([load_json("alpaca_spin_offs.json")["malformed"]])
     with pytest.raises(KeyError):
         _spin_offs(http)
+
+
+def test_repeated_next_page_token_raises_instead_of_looping() -> None:
+    page = {"bars": {}, "next_page_token": "LOOP"}
+    http = RecordingHttp([page, page, page, page])
+    with pytest.raises(RuntimeError, match="repeated next_page_token"):
+        _client(http).fetch_bars(
+            ["AAA"], datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 8, tzinfo=UTC)
+        )
+    assert len(http.calls) == 2
+
+
+def test_runaway_paging_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    import harness.data.alpaca as alpaca
+
+    monkeypatch.setattr(alpaca, "MAX_PAGES", 3)
+
+    class Endless:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def get_json(
+            self, url: str, params: Mapping[str, str], headers: Mapping[str, str]
+        ) -> dict[str, Any]:
+            self.n += 1
+            return {"bars": {}, "next_page_token": f"T{self.n}"}
+
+    endless = Endless()
+    limiter = RateLimiter(max_calls=1000, period_s=60.0, clock=lambda: 0.0, sleep=lambda s: None)
+    with pytest.raises(RuntimeError, match="MAX_PAGES"):
+        AlpacaDataClient(endless, _config(), limiter).fetch_bars(
+            ["AAA"], datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 8, tzinfo=UTC)
+        )
+    assert endless.n == 3
+
+
+def _reverse_split_actions() -> list[CorporateAction]:
+    http = RecordingHttp([load_json("alpaca_reverse_splits.json")])
+    return _client(http).fetch_corporate_actions(
+        ["ABC"], datetime(2021, 1, 1, tzinfo=UTC), datetime(2021, 12, 31, tzinfo=UTC)
+    )
+
+
+def test_reverse_split_value_is_new_over_old_rate() -> None:
+    (action,) = _reverse_split_actions()
+    assert action.kind is CorporateActionKind.SPLIT
+    assert action.symbol == "ABC"
+    assert action.value == 0.125  # 1-for-8; a forward 4-for-1 would be 4.0
+
+
+def test_reverse_split_makes_raw_prices_continuous_after_adjustment() -> None:
+    actions = _reverse_split_actions()
+    # Raw tape: ~13 before the 2021-08-02 ex-date, ~104 after (8x the old price).
+    raw = series(
+        "ABC", [13.0, 13.1, 12.9, 13.0, 104.0, 104.8, 103.2, 104.0], start=date(2021, 7, 27)
+    )
+    adjusted = adjust_bars(raw, actions)
+    closes = [b.close for b in adjusted]
+    assert closes[3] == pytest.approx(104.0)
+    assert closes[4] == pytest.approx(104.0)
+    assert adjusted[0].volume == pytest.approx(raw[0].volume / 8)
+    assert find_unadjusted_jumps(adjusted) == []

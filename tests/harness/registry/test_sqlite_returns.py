@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from contracts.registry import ReturnSeries
+from contracts.registry import DuplicateTrialError, ReturnSeries
 from harness.registry.sqlite import SqliteRegistry
 from harness.validation.pbo import probability_of_backtest_overfitting
 
@@ -98,3 +98,21 @@ def test_series_persist_across_connections(tmp_path: Path) -> None:
     first.connection.close()
     (stored,) = SqliteRegistry(path).returns_for_group("g", limit=5)
     assert stored.trial_id == series.trial_id
+
+
+def test_a_check_violation_is_not_reported_as_a_duplicate() -> None:
+    registry = SqliteRegistry()
+    bypassed = ReturnSeries.model_construct(
+        trial_id=uuid.uuid4(), group_key="g", timestamps=(), returns=()
+    )  # skips validation so the n > 0 CHECK is what fires
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        registry.append_returns(bypassed)
+    registry.append_returns(_series("g", np.ones(5) * 0.001))  # the failed write rolled back
+
+
+def test_a_real_duplicate_is_still_a_duplicate() -> None:
+    registry = SqliteRegistry()
+    series = _series("g", np.ones(5) * 0.001)
+    registry.append_returns(series)
+    with pytest.raises(DuplicateTrialError):
+        registry.append_returns(series)

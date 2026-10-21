@@ -1,3 +1,4 @@
+from contracts._frozen import FrozenMap
 from contracts.capital import DEFAULT_CAPITAL_USD, CapitalConfig
 from contracts.costs import CostModel, MarketState, Order
 from contracts.data import (
@@ -30,7 +31,7 @@ from contracts.runtime import (
     UnknownCommandError,
 )
 from contracts.splitting import Split, Splitter
-from contracts.strategy import Strategy
+from contracts.strategy import ParametrizedStrategy, Params, ParamValue, Strategy
 
 __all__ = [
     "DEFAULT_CAPITAL_USD",
@@ -47,11 +48,15 @@ __all__ = [
     "DataProvider",
     "DataView",
     "DuplicateTrialError",
+    "FrozenMap",
     "Intent",
     "LookaheadError",
     "MarketState",
     "Order",
     "Outcome",
+    "ParamValue",
+    "ParametrizedStrategy",
+    "Params",
     "Registry",
     "ReturnSeries",
     "ReturnSeriesMismatchError",

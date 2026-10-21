@@ -1,0 +1,17 @@
+{
+  "corporate_actions": {
+    "reverse_splits": [
+      {
+        "symbol": "ABC",
+        "ex_date": "2021-08-02",
+        "process_date": "2021-08-02",
+        "record_date": "2021-07-30",
+        "payable_date": "2021-08-02",
+        "new_rate": 1,
+        "old_rate": 8,
+        "cusip": "000000000"
+      }
+    ]
+  },
+  "next_page_token": null
+}

@@ -22,6 +22,7 @@ from harness.registry.sqlite import SqliteRegistry
 from harness.validation.pipeline import PipelineResult, run_pipeline
 from strategies.baseline import BaselineReversal
 from tests.data_fixtures import series
+from tests.helpers import research_provider
 
 SEED = 11
 START = date(2024, 1, 2)
@@ -89,7 +90,7 @@ def _run_pipeline(registry: SqliteRegistry) -> PipelineResult:
         strategy=BaselineReversal(symbols=SYMBOLS, top_n=2, lookback=LOOKBACK),
         build=lambda p: BaselineReversal(symbols=SYMBOLS, top_n=2, lookback=int(p["lookback"])),
         params={"lookback": LOOKBACK},
-        provider=_provider(),
+        provider=research_provider(_provider(), end=end),
         symbols=SYMBOLS,
         start=start,
         end=end,

@@ -25,6 +25,7 @@ from collections.abc import Mapping
 
 import numpy as np
 from numpy.typing import NDArray
+from pydantic import BaseModel, ConfigDict
 from scipy.stats import kurtosis as _kurtosis  # type: ignore[import-untyped]
 from scipy.stats import norm
 from scipy.stats import skew as _skew
@@ -94,6 +95,17 @@ def trial_sharpe_variance(registry: Registry) -> float | None:
     return float(np.var(values, ddof=1))
 
 
+class PboRefusal(BaseModel):
+    """The candidate's return series was refused by the registry (calendar mismatch).
+
+    `fails` is set by the pipeline when the group is established, i.e. PBO would have gated.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    fails: bool
+
+
 def _fail(reason: str, metrics: Mapping[str, float] | None = None) -> StageResult:
     return StageResult(
         stage=Stage.TRIAL_ADJUSTED, passed=False, reason=reason, metrics=dict(metrics or {})
@@ -107,11 +119,18 @@ def trial_adjusted_stage(
     peer_returns: NDArray[np.float64] | None = None,
     neighbour_returns: NDArray[np.float64] | None = None,
     pbo_note: str | None = None,
+    pbo_refusal: PboRefusal | None = None,
     sr_variance: float | None = None,
     n_trials: int | None = None,
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> StageResult:
     """Fail unless DSR clears `dsr_min_probability` and cross-trial PBO is not above `pbo_max`.
+
+    PBO here is a FIELD-LEVEL overfitting diagnostic (owner decision 2026-10-20): CSCV asks whether
+    the in-sample winner of the whole group of trials, candidate included, holds up out of sample.
+    It is not a per-candidate test: beside one genuinely strong peer a weak candidate also sees a
+    low PBO. DSR and the later stages do the per-candidate rejection; a PBO failure means the field
+    looks overfit, which the candidate is part of.
 
     `n_trials` overrides `Registry.count()`; the pipeline passes count + 1 so the candidate (not
     yet appended) counts exactly once.
@@ -121,6 +140,10 @@ def trial_adjusted_stage(
     `pbo_min_trials` columns, PBO over it gates: strictly above `pbo_max` fails, and a matrix that
     cannot be evaluated fails closed. Below that the estimate is too erratic to gate and only the
     group size is recorded. `pbo_note` explains why no matrix exists and goes into the reason.
+
+    `pbo_refusal` says the candidate's series was refused for not matching the group's calendar:
+    `pbo_refused = 1.0` is always recorded, and when `fails` is set (the group is established) the
+    stage fails, so a mismatch cannot switch the gate off.
 
     `neighbour_returns` is the candidate and its parameter neighbours. Those are near-identical
     strategies, so their PBO measures which neighbour wins, not overfitting: it is recorded as
@@ -152,6 +175,8 @@ def trial_adjusted_stage(
         "pbo_group_size": float(group_size),
         "pbo_neighbours_computed": 0.0,
     }
+    if pbo_refusal is not None:
+        metrics["pbo_refused"] = 1.0
     try:
         dsr = deflated_sharpe_ratio(
             sharpe,
@@ -164,6 +189,8 @@ def trial_adjusted_stage(
     except ValueError as err:
         return _fail(f"DSR undefined: {err}", metrics)
     metrics["dsr"] = dsr
+    if pbo_refusal is not None and pbo_refusal.fails:
+        return _fail("return series does not match the group's calendar", metrics)
 
     if neighbour_returns is not None:
         try:
@@ -184,8 +211,8 @@ def trial_adjusted_stage(
         metrics["pbo_computed"] = 1.0
         if pbo > thresholds.pbo_max:
             return _fail(
-                f"PBO {pbo:.3f} over {group_size} trials is above the maximum "
-                f"{thresholds.pbo_max:.3f}",
+                f"field PBO {pbo:.3f} over {group_size} trials is above the maximum "
+                f"{thresholds.pbo_max:.3f} (a property of the whole field, not of this candidate)",
                 metrics,
             )
 

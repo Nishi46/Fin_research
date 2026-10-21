@@ -29,14 +29,14 @@ from harness.api import BacktestResult
 from harness.engine.runner import run_backtest
 from harness.thresholds import DEFAULT_THRESHOLDS
 from harness.validation.pbo import probability_of_backtest_overfitting
-from harness.validation.peers import group_key
+from harness.validation.peers import cost_model_fingerprint, group_key
 from harness.validation.pipeline import PipelineResult, run_pipeline
 from harness.validation.walk_forward import walk_forward_stage
 from tests.adversarial._sim import best_of_n
 from tests.adversarial.strategies.noise import NoiseStrategy
 from tests.adversarial.strategies.reversal import ReversalStrategy
 from tests.adversarial.worlds import World, noise_world, planted_edge_world
-from tests.helpers import make_trial
+from tests.helpers import make_trial, research_provider
 
 SYMBOLS = tuple(f"S{i:02d}" for i in range(6))
 N_NOISE = 60  # for the multi-seed statistic
@@ -86,6 +86,7 @@ def _file_as_the_pipeline_does(
                         cost_multiplier=result.cost_multiplier,
                         capital_amount=result.capital.amount,
                         capital_currency=result.capital.currency,
+                        cost_fingerprint=cost_model_fingerprint(None),
                     ),
                     timestamps=result.timestamps,
                     returns=result.daily_returns,
@@ -106,7 +107,7 @@ def _submit(
         strategy=strategy,
         build=build,
         params=params,
-        provider=world.provider(),
+        provider=research_provider(world.provider(), end=world.timestamps[-1]),
         symbols=list(world.symbols),
         start=world.timestamps[0],
         end=world.timestamps[-1],

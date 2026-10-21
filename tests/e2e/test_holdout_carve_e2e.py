@@ -20,7 +20,7 @@ import pandas as pd  # type: ignore[import-untyped]
 import pytest
 
 from contracts.capital import CapitalConfig
-from contracts.data import Bar, CorporateAction, DataProvider, Snapshot
+from contracts.data import Bar, CorporateAction, DataProvider
 from contracts.dataview import DataView
 from contracts.intent import Intent
 from contracts.registry import Outcome
@@ -76,11 +76,11 @@ class LongEdge:
         return Intent(asof=asof, weights={"EDGE": 1.0} if present else {})
 
 
-class Recorder:
-    """Pass-through DataProvider that remembers the newest bar or action it ever returned."""
+class Recorder(ResearchWindow):
+    """ResearchWindow that remembers the newest bar or action it ever returned."""
 
-    def __init__(self, inner: DataProvider) -> None:
-        self._inner = inner
+    def __init__(self, inner: DataProvider, research_end: date) -> None:
+        super().__init__(inner, research_end)
         self.newest: datetime | None = None
         self.calls = 0
 
@@ -90,21 +90,15 @@ class Recorder:
             top = max(stamps)
             self.newest = top if self.newest is None else max(self.newest, top)
 
-    def snapshot(self) -> Snapshot:
-        return self._inner.snapshot()
-
     def bars(self, symbols: Sequence[str], end: datetime) -> list[Bar]:
-        out = self._inner.bars(symbols, end)
+        out = super().bars(symbols, end)
         self._see([b.ts for b in out])
         return out
 
     def corporate_actions(self, symbols: Sequence[str], end: datetime) -> list[CorporateAction]:
-        out = self._inner.corporate_actions(symbols, end)
+        out = super().corporate_actions(symbols, end)
         self._see([a.effective_at for a in out])
         return out
-
-    def membership(self, index: str, on: date) -> frozenset[str]:
-        return self._inner.membership(index, on)
 
 
 @dataclass(frozen=True)
@@ -225,7 +219,8 @@ def _verdict(world: World, strategy_id: str) -> bool:
 
 
 def _research_pipeline(provider: DataProvider, world: World) -> tuple[Outcome, str]:
-    _, end = world.window()
+    # the pipeline refuses an end past the research window; the carve's own end is the holdout's
+    end = session_close_utc(world.research_end)
     registry = SqliteRegistry()
     result = run_pipeline(
         strategy=BaselineReversal(symbols=SYMBOLS, top_n=1, lookback=5),
@@ -264,7 +259,7 @@ def test_research_pipeline_never_sees_a_bar_after_research_end(worlds: dict[str,
     w = worlds["holdout"]
     cap = session_close_utc(w.research_end)
     composed = ComposedDataProvider(w.research_bars(), corporate_actions=w.research_actions())
-    spy = Recorder(ResearchWindow(composed, w.research_end))
+    spy = Recorder(composed, w.research_end)
 
     outcome, snapshot_id = _research_pipeline(spy, w)
 
@@ -281,7 +276,7 @@ def test_research_window_clamps_even_when_the_inner_provider_holds_everything(
     w = worlds["holdout"]
     cap = session_close_utc(w.research_end)
     everything = ComposedDataProvider(w.source_bars)
-    spy = Recorder(ResearchWindow(everything, w.research_end))
+    spy = Recorder(everything, w.research_end)
 
     outcome, _ = _research_pipeline(spy, w)
 

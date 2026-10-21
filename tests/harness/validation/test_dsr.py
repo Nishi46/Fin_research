@@ -26,6 +26,7 @@ from fakes.registry import InMemoryRegistry
 from harness.api import BacktestResult
 from harness.thresholds import DEFAULT_THRESHOLDS, Thresholds
 from harness.validation.dsr import (
+    PboRefusal,
     deflated_sharpe_ratio,
     expected_max_sharpe,
     sharpe_moments,
@@ -203,7 +204,7 @@ def test_trials_without_a_real_sharpe_are_ignored_for_the_variance() -> None:
 
 # --- cross-trial PBO: column 0 of `peer_returns` is the candidate -------------------------------
 
-MIN_TRIALS = 6  # small for speed; the production default is 30
+MIN_TRIALS = 10  # small for speed; the production default is 30
 SMALL = {"pbo_min_trials": MIN_TRIALS, "pbo_n_blocks": 8}
 
 
@@ -224,6 +225,9 @@ def test_peer_pbo_gates_once_the_group_is_large_enough() -> None:
     )
     assert not verdict.passed
     assert "pbo" in verdict.reason.lower()
+    # PBO describes the whole field of trials, not this candidate alone (owner decision 2026-10-20),
+    # so a rejection must not read as "this candidate overfits".
+    assert "field" in verdict.reason.lower()
     assert verdict.metrics["pbo"] == pytest.approx(pbo)
     assert verdict.metrics["pbo_computed"] == 1.0
     assert verdict.metrics["pbo_gating"] == 1.0
@@ -303,3 +307,34 @@ def test_neighbour_pbo_that_cannot_be_computed_is_recorded_not_fatal() -> None:
     )
     assert verdict.passed
     assert verdict.metrics["pbo_neighbours_computed"] == 0.0
+
+
+def test_a_refusal_in_an_established_group_fails_the_stage() -> None:
+    verdict = trial_adjusted_stage(
+        edge_result(),
+        registry_with(1),
+        pbo_note="refused",
+        pbo_refusal=PboRefusal(fails=True),
+        thresholds=Thresholds(**SMALL),
+    )
+    assert not verdict.passed
+    assert "calendar" in verdict.reason
+    assert verdict.metrics["pbo_refused"] == 1.0
+
+
+def test_a_refusal_in_a_small_group_is_recorded_and_does_not_gate() -> None:
+    verdict = trial_adjusted_stage(
+        edge_result(),
+        registry_with(1),
+        pbo_note="refused",
+        pbo_refusal=PboRefusal(fails=False),
+        thresholds=Thresholds(**SMALL),
+    )
+    assert verdict.passed
+    assert verdict.metrics["pbo_refused"] == 1.0
+    assert verdict.metrics["pbo_gating"] == 0.0
+
+
+def test_no_refusal_records_no_refused_metric() -> None:
+    verdict = trial_adjusted_stage(edge_result(), registry_with(1), thresholds=Thresholds(**SMALL))
+    assert "pbo_refused" not in verdict.metrics

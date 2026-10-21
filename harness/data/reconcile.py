@@ -49,12 +49,14 @@ def reconcile(
     config = config or ReconcileConfig.from_thresholds()
     other_by_key: dict[tuple[str, date], Bar] = {(b.symbol, b.ts.date()): b for b in other}
     compared = 0
+    compared_symbols: set[str] = set()
     disagreements: list[Issue] = []
     for bar in primary:
         match = other_by_key.get((bar.symbol, bar.ts.date()))
         if match is None:
             continue
         compared += 1
+        compared_symbols.add(bar.symbol)
         if abs(bar.close / match.close - 1) > config.price_tolerance:
             disagreements.append(
                 Issue(
@@ -66,12 +68,16 @@ def reconcile(
             )
     total = len(primary)
     reason = ""
+    # Pooled thresholds can hide one symbol with no coverage at all (e.g. BRK.B vs BRK-B).
+    uncovered = sorted({b.symbol for b in primary} - compared_symbols)
     if compared == 0:
         reason = "no overlapping bars"
     elif compared / total < config.min_overlap:
         reason = f"overlap {compared}/{total} below {config.min_overlap:.0%}"
     elif len(disagreements) / compared > config.max_disagree_fraction:
         reason = f"{len(disagreements)}/{compared} bars disagree beyond tolerance"
+    elif uncovered:
+        reason = f"no overlap for: {', '.join(uncovered)}"
     return ReconciliationReport(
         source=source,
         compared=compared,
